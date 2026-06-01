@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.pyright/
+
+# Env / secrets
+.env
+*.env
+
+# IDE
+.idea/
+.vscode/
+
+# seal-public build output + local target pointer (machine-specific path)
+publish/.staging/
+publish/.target

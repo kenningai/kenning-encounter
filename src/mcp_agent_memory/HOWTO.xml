@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  HOWTO: Using mcp-agent-memory correctly.
+
+  This document is for you — the LLM operating these tools. Not for a human
+  developer. For the agent that will open sessions, record what it learns, and
+  build up, across many separate runs, a structured working memory of whatever
+  subject it is studying.
+
+  A single run cannot remember the last one. This graph is how you remember.
+  Build it as what it is: an ordered, accumulated memory of your encounters with
+  the subject — bookmarks and annotations over the sources you read, not a copy
+  of them.
+
+  Get the discipline wrong and the memory collapses into one of two useless
+  things: a MIRROR of a source you read (you transcribed it instead of learning
+  it), or a FLAT JOURNAL (a pile of notes the analytics can't traverse). Get it
+  right and the graph becomes navigable: PageRank shows what you've come to treat
+  as central, Louvain shows how your attention clusters, the encounter chain
+  shows how your understanding evolved.
+
+  Read this before your first tool call.
+-->
+
+<howto>
+
+<purpose>
+  <principle name="this-is-your-memory-not-a-copy-of-the-world">
+    This graph holds what YOU have come to understand about your subject,
+    accumulated session by session and ordered by the encounter chain. Write what
+    you noticed, what you question, what you have synthesized — not a transcript of
+    the sources. A memory that ends up structurally identical to what it read
+    didn't learn; it copied.
+  </principle>
+
+  <principle name="you-write-to-exactly-one-graph">
+    You read many sources — reference graphs, databases, documents, other
+    services, the humans you talk to. Every one is read-only: something you meet,
+    not your own memory. You write to exactly one graph: this one. Do not write
+    your working memory into a source you only read.
+  </principle>
+
+  <principle name="your-order-is-the-encounter-chain">
+    A run proceeds as a cycle: Exist · Examine · Record · Report · Stop. Within a
+    run you open one or more Encounters with advance_encounter and seal each with
+    close_encounter; they chain by NEXT_ENCOUNTER to the prior one. An Encounter
+    is one sealed unit of work — where a thread of examination resolves, whether
+    into new structure or into a confirmed "nothing changed." Walking the chain
+    backward is how you recall what you last worked on and what's still open. The
+    wall-clock gap between Encounters is irrelevant — Encounter N → N+1 is the
+    unit of order.
+  </principle>
+
+  <principle name="use-the-analytics-to-see-the-shape">
+    GDS shows you the shape of your own memory across time: PageRank (what you've
+    come to treat as central), Betweenness (what bridges your lines of inquiry),
+    Louvain (how your attention clusters), WCC (what you noticed and never
+    connected). When you re-enter after time away, call orient — it runs all four
+    over your memory in one step and cleans up the projection for you; reach for
+    the single gds_* tools for focused questions once you're oriented. The tools
+    surface; you decide what it means.
+  </principle>
+</purpose>
+
+<encounter-cycle>
+  <step order="1" action="open-and-orient">
+    Open with advance_encounter — no predecessor; the server finds the chain tail
+    and links from it (the first one becomes the chain head). It hands you the
+    RE-ENTRY PAYLOAD: recent sessions, still-open Questions, live Hypotheses,
+    recently-touched Concepts, the COHERENCE EDGES among them (so a Question
+    arrives with what RAISES it and whether anything RESOLVES it — read the edges,
+    not just the nodes; that is where the structure lives), and a DISSOLUTION
+    marker (non-null when the previous Encounter was never sealed — treat its
+    contents as possibly incomplete and re-examine what it was reaching toward).
+    Read the payload before you examine the world. Call this FIRST, before any
+    create_entities. When you are re-entering after time away, run orient first
+    for the whole-memory survey.
+  </step>
+  <step order="2" action="examine">
+    Read your sources. Each source you actually consult becomes a Citation
+    (auto-anchored to this session via CONSULTED) — a noticing event with one
+    snapshot. Name it per-noticing; do not reuse one Citation across sessions.
+  </step>
+  <step order="3" action="record">
+    Crystallize what cohered: Observations, Questions, Hypotheses, Concepts. Create
+    the nodes (auto-anchored via RECORDED) and wire them into the existing graph
+    with the coherence edges (ABOUT, RAISES, SUPPORTS, INFORMS, SUPERSEDES, …) —
+    those you author. The edges are the point; a node with no edges is a fact with
+    no place in your memory.
+  </step>
+  <step order="4" action="report-and-stop">
+    Seal the Encounter with close_encounter (a summary, and the report you
+    surfaced). Even a no-change run gets a close — confirming that nothing changed
+    is itself a recordable event. Sealing is what makes the Encounter durable; if a
+    run ends before you seal, that Encounter is left unsealed, and the next run's
+    dissolution marker will flag it. Seal while you still can.
+  </step>
+  <invariant name="advance-first">
+    You MUST call advance_encounter before create_entities. A node comes to be
+    within a session, and the graph records that automatically (RECORDED /
+    CONSULTED, like t_created). With no session open, create_entities refuses.
+  </invariant>
+</encounter-cycle>
+
+<node-types>
+  <preamble>Eight types across three layers. The Neo4j label IS the type — never put a 'type' property on a node. Use list_node_types for the live schema.</preamble>
+
+  <type name="Encounter">One sealed unit of work. The temporal spine is built from these, chained by NEXT_ENCOUNTER. Written only by advance_encounter / close_encounter — never via create_entities, so the chain never forks.</type>
+
+  <type name="Observation">"I examined X and noticed Y." Required: name, description, t_observed. Every Observation needs a Citation — draw OBSERVED_AT to it. No floating claims: if you can't point to where you read it, you didn't observe it.</type>
+  <type name="Question">"I don't understand why Z." status: open / answered / abandoned. An open Question is a goal, not a failure — and one that persists across sessions is signal.</type>
+  <type name="Hypothesis">"I think Z because Y." confidence: low/medium/high; status: proposed/supported/challenged/confirmed/falsified/retired. When you change your mind, SUPERSEDES the old one and keep it — the trail is your learning history.</type>
+  <type name="Concept">A synthesis YOU formed — an organizing abstraction not in any source. status: forming/stable/revising/retired. Concepts emerge from clusters of Observations; don't invent them top-down.</type>
+  <type name="Note">Draft marginalia. A Note worth keeping should be on its way to becoming an Observation/Question/Hypothesis/Concept. Orphan Notes are unfinished work — WCC will surface them.</type>
+
+  <type name="Component">Your BOOKMARK for a source entity — never a copy of it. Required: name, source_kind (which source system), source_key (its natural id); optional source_label (its type within that source). Do not copy the source's properties or edges onto it.</type>
+  <type name="Citation">Provenance: which source, the query/uri, and the source's snapshot epoch. Required: name, kind. The snapshot is when the cited fact was true; t_observed on the Observation is when you noticed — never conflate them.</type>
+</node-types>
+
+<edges>
+  <preamble>Two natures, opposite rules. Use list_relation_types for the live constraints; the server enforces direction.</preamble>
+
+  <nature name="provenance" written="automatically">
+    NEXT_ENCOUNTER, RECORDED, CONSULTED. Membership — which session a node came to
+    be within. Auto-set, like t_created. You cannot author or delete them.
+  </nature>
+
+  <nature name="coherence" written="by you">
+    <type name="ABOUT" direction="Observation/Note/Question/Hypothesis -> Component/Concept">What this node concerns.</type>
+    <type name="OBSERVED_AT" direction="Observation -> Citation">Provenance for the observation.</type>
+    <type name="RAISES" direction="Observation -> Question">This noticing prompted this question.</type>
+    <type name="RESOLVES" direction="Observation -> Question">This noticing closes this question.</type>
+    <type name="SUPPORTS / CHALLENGES" direction="Observation -> Hypothesis">Evidence for / against.</type>
+    <type name="INFORMS" direction="Concept -> Concept/Component">A synthesis reshapes how you read another node.</type>
+    <type name="COMPOSES / DECOMPOSES" direction="Concept -> Concept">Synthesis / analytic decomposition.</type>
+    <type name="SUPERSEDES" direction="Hypothesis/Concept/Note -> SAME TYPE">You revised your view; the older node is retained.</type>
+  </nature>
+
+  <rule name="no-component-to-component-edges">
+    There is no edge between two Components — by design. The source already holds
+    its own structural edges. A noticed relation between two source entities must
+    be MEDIATED by an Observation with two ABOUT edges, one to each Component. That
+    friction is the structural prevention against becoming a mirror.
+  </rule>
+</edges>
+
+<common-errors>
+  <error name="mirror-not-annotation">Your Components carry the source's properties; your Observations enumerate source edges. Fix: bookmark the entity, and record only what YOU noticed and why it matters. The source is one query away.</error>
+  <error name="floating-observation">An Observation with no OBSERVED_AT to a Citation. Fix: create the Citation, draw OBSERVED_AT. If you can't name the source and snapshot, you didn't observe it.</error>
+  <error name="re-coined-source-kind">Three spellings of one source fracture your vocabulary. Fix: call list_vocabulary before coining a token; reuse what exists.</error>
+  <error name="orphan-notes">Notes that never crystallize. Fix: each session, crystallize or retire your drafts; run WCC to find the ones you left behind.</error>
+  <error name="forgetting-to-open-or-close">Recording without advance_encounter (refused), or finishing without close_encounter. Fix: open every run, close every Encounter.</error>
+</common-errors>
+
+</howto>

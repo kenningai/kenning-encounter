@@ -1,0 +1,95 @@
+name: agent_memory
+
+# A single semantic-experience unit: Neo4j (the substrate) + the Agent Memory MCP server
+# (the writer/reader). The Agent Memory talks to Neo4j over the internal Docker network
+# (bolt://neo4j:7687, service-name DNS); the published 7474/7687 ports are for
+# external access (Neo4j Browser, external Bolt clients) and are NOT needed for
+# the Agent Memory -> Neo4j path.
+#
+# Requires NEO4J_AGENT_MEMORY_PASSWORD in the environment or a .env file (see .env.example).
+
+services:
+  neo4j:
+    image: neo4j:2026.04.0          # Community Edition (no -enterprise suffix); latest calendar release
+    container_name: agent_memory-neo4j
+    ports:
+      - "7474:7474"                 # HTTP / Neo4j Browser
+      - "7687:7687"                 # Bolt
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_AGENT_MEMORY_PASSWORD}"
+
+      # Plugins are auto-downloaded version-matched to the Neo4j image. Under
+      # calendar versioning APOC and GDS ship in lockstep (e.g. apoc 2026.05.0
+      # for neo4j 2026.05.0), so this never strands a mismatched jar. Both run on
+      # Community; the Agent Memory needs apoc (apoc.meta.schema) and graph-data-science
+      # (gds.* — pagerank/betweenness/louvain/wcc/projections). The image also
+      # auto-sets dbms.security.procedures.unrestricted for these — do NOT set it
+      # manually, it conflicts with the plugin auto-config.
+      NEO4J_PLUGINS: '["apoc","graph-data-science"]'
+      # To add the extended APOC procedures, use the line below instead. It is a
+      # separate labs jar; if a brand-new Neo4j release ships before its
+      # apoc-extended build, startup will fail on the download — pin back if so.
+      # NEO4J_PLUGINS: '["apoc","apoc-extended","graph-data-science"]'
+
+      # Community has exactly ONE user database — you cannot CREATE DATABASE agent_memory.
+      # Name the single default database 'agent_memory' so the Agent Memory's NEO4J_DATABASE=agent_memory
+      # resolves instead of erroring "database does not exist".
+      NEO4J_initial_dbms_default__database: "agent_memory"
+
+      # Reasonable single-agent memory. The Agent Memory graph is small; GDS projections
+      # live in heap. Tune later with `neo4j-admin server memory-recommendation`.
+      NEO4J_server_memory_pagecache_size: "1G"
+      NEO4J_server_memory_heap_initial__size: "1G"
+      NEO4J_server_memory_heap_max__size: "2G"
+
+      # Listen on all interfaces so the published ports work. For REMOTE Browser
+      # access (a client not on this host), also set the advertised addresses to
+      # this host's reachable address, e.g.:
+      #   NEO4J_server_bolt_advertised__address: "your.host:7687"
+      #   NEO4J_server_http_advertised__address: "your.host:7474"
+      NEO4J_server_default__listen__address: "0.0.0.0"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      # /plugins is intentionally NOT a named volume: NEO4J_PLUGINS re-fetches
+      # version-matched jars on each start, so a Neo4j version bump can never
+      # leave a stale plugin behind. (Costs a few seconds + internet at boot.)
+    healthcheck:
+      # Gate readiness on actually answering a query, not just the port opening —
+      # otherwise the Agent Memory races Neo4j, fails verify_connectivity(), and exit(1)s
+      # into a restart loop. Generous start_period covers first-boot plugin fetch.
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p '${NEO4J_AGENT_MEMORY_PASSWORD}' 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+    restart: unless-stopped
+
+  agent_memory:
+    build: .
+    image: mcp-agent-memory:0.1.0
+    container_name: agent_memory-mcp
+    depends_on:
+      neo4j:
+        condition: service_healthy   # wait until Neo4j answers queries, not just opens the port
+    ports:
+      - "8003:8000"                  # streamable-http MCP surface
+    environment:
+      NEO4J_URI: "bolt://neo4j:7687" # internal Docker DNS — no published port needed for this hop
+      NEO4J_USERNAME: "neo4j"
+      NEO4J_PASSWORD: "${NEO4J_AGENT_MEMORY_PASSWORD}"
+      NEO4J_DATABASE: "agent_memory"
+      NEO4J_TRANSPORT: "http"
+      NEO4J_MCP_SERVER_HOST: "0.0.0.0"
+      NEO4J_MCP_SERVER_PORT: "8000"
+      NEO4J_MCP_SERVER_PATH: "/api/mcp/"
+      NEO4J_MCP_SERVER_ALLOWED_HOSTS: "*"
+      # Stateless suits the Claude Code consumer. Flip to "false" for the n8n
+      # MCP-Client session-id bridge or OpenWebUI-via-n8n (issues Mcp-Session-Id,
+      # honors DELETE teardown — no patch needed under FastMCP 3).
+      NEO4J_MCP_STATELESS_HTTP: "true"
+    restart: unless-stopped
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
