@@ -1,15 +1,14 @@
 Copyright (c) 2026 Conor O'Shea, Kenning AI
 
 "Agent Memory" (the mcp-agent-memory package) is licensed under the Hippocratic
-License, Version 3.0, with the Military Activities (MIL) and Mass Surveillance
-(SV) ethical-standards modules.
+License, Version 3.0, with the Mass Surveillance (SV) ethical-standards module.
 
 The Hippocratic License is an ethical-source license, NOT an OSI-approved
 open-source license. This project is "source-available" / "ethical source" —
 please do not describe it as "open source."
 
 The authoritative, permalink-stamped license text is published at
-https://firstdonoharm.dev/version/3/0/mil-sv.md and is reproduced in full below.
+https://firstdonoharm.dev/version/3/0/sv.md and is reproduced in full below.
 
 ================================================================================
 
@@ -17,7 +16,7 @@ https://firstdonoharm.dev/version/3/0/mil-sv.md and is reproduced in full below.
 
 **Version 3.0, October 2021**
 
-<https://firstdonoharm.dev/version/3/0/mil-sv.md>
+<https://firstdonoharm.dev/version/3/0/sv.md>
 
 **TERMS AND CONDITIONS**
 
@@ -70,9 +69,8 @@ The rights granted to the Licensee by this License are expressly made subject to
   * [3.1.9.](#3.1.9) Arbitrarily deprive any person of his/her/their property (See Article 17, _United Nations Universal Declaration of Human Rights_);
   * [3.1.10.](#3.1.10) Forcibly remove indigenous peoples from their lands or territories or take any action with the aim or effect of dispossessing indigenous peoples from their lands, territories, or resources, including without limitation the intellectual property or traditional knowledge of indigenous peoples, without the free, prior, and informed consent of indigenous peoples concerned (See Articles 8 and 10, _United Nations Declaration on the Rights of Indigenous Peoples_);
   * [3.1.11.](#3.1.11) _Mass Surveillance_: Be a government agency or multinational corporation, or a representative, agent, affiliate, successor, attorney, or assign of a government or multinational corporation, which participates in mass surveillance programs;
-  * [3.1.12.](#3.1.12) _Military Activities_: Be an entity or a representative, agent, affiliate, successor, attorney, or assign of an entity which conducts military activities;
-  * [3.1.13.](#3.1.13) Interfere with Workers’ free exercise of the right to organize and associate (See Article 20, United Nations Universal Declaration of Human Rights; C087 - Freedom of Association and Protection of the Right to Organise Convention, 1948 (No. 87), International Labour Organization; Article 8, International Covenant on Economic, Social and Cultural Rights); and
-  * [3.1.14.](#3.1.14) Harm the environment in a manner inconsistent with local, state, national, or international law.
+  * [3.1.12.](#3.1.12) Interfere with Workers’ free exercise of the right to organize and associate (See Article 20, United Nations Universal Declaration of Human Rights; C087 - Freedom of Association and Protection of the Right to Organise Convention, 1948 (No. 87), International Labour Organization; Article 8, International Covenant on Economic, Social and Cultural Rights); and
+  * [3.1.13.](#3.1.13) Harm the environment in a manner inconsistent with local, state, national, or international law.
 * [3.2.](#3.2) The Licensee SHALL:
 
   * [3.2.1.](#3.2.1) Provide equal pay for equal work where the performance of such work requires equal skill, effort, and responsibility, and which are performed under similar working conditions, except where such payment is made pursuant to:
