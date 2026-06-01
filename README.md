@@ -39,12 +39,19 @@ re-deriving it every session.
   recent sessions, open questions, live hypotheses, recent concepts),
   `close_encounter` (annotate the session at the end).
 - **Write:** `create_entities` (auto-anchored to the open session),
-  `create_relations` (the agent's authored links), `delete_entities`,
+  `create_relations` (the agent's authored links; `SUPERSEDES` carries a required
+  `revision_why` — a revision records what changed and why), `delete_entities`,
   `delete_relations`.
-- **Read:** `search`, `find_by_name`, `read_cypher` (EXPLAIN-gated, read-only),
-  `get_schema`, `list_node_types`, `list_relation_types`, `list_vocabulary`.
-- **Analytics (GDS):** `gds_create_projection` → `gds_pagerank` /
-  `gds_betweenness` / `gds_louvain` / `gds_wcc` → `gds_drop_projection`.
+- **Read:** `search`, `find_by_name`, `trace_provenance` (walk a node's grounding
+  subtree back to the observations and citations under it), `read_cypher`
+  (EXPLAIN-gated, read-only), `get_schema`, `list_node_types`,
+  `list_relation_types`, `list_vocabulary`.
+- **Analytics:** `orient` — a one-call spread (PageRank / Betweenness / Louvain /
+  WCC) over the authored-edge graph, managing the projection for you, plus a
+  **frontier** view of where the graph is thinnest (unanswered questions, untested
+  hypotheses, ungrounded concepts). For focused questions: `gds_create_projection`
+  → `gds_pagerank` / `gds_betweenness` / `gds_louvain` / `gds_wcc` →
+  `gds_drop_projection`.
 
 The operations manual is served as the MCP resource `agent-memory://howto` and
 also ships at `src/mcp_agent_memory/HOWTO.xml` — read it before recording.

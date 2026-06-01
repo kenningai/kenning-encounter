@@ -41,8 +41,8 @@ class TestRelationTypeEnum:
             assert rt.value in RELATION_SCHEMAS, f"Missing schema for {rt.value}"
 
     def test_enum_count(self):
-        # 3 provenance + 10 coherence
-        assert len(RelationType) == 13
+        # 3 provenance + 11 coherence (GROUNDS added in v0.2.0)
+        assert len(RelationType) == 14
 
     def test_process_edges_are_relation_types(self):
         for e in PROCESS_EDGES:
@@ -269,6 +269,19 @@ class TestRelationValidation:
         with pytest.raises(ValueError, match="requires source"):
             validate_relation("INFORMS", "Component", "Concept")
 
+    def test_grounds_observation_to_concept(self):
+        assert validate_relation("GROUNDS", "Observation", "Concept") == {}
+
+    def test_grounds_wrong_source(self):
+        # GROUNDS is Observation -> Concept only; a Concept cannot ground.
+        with pytest.raises(ValueError, match="requires source"):
+            validate_relation("GROUNDS", "Concept", "Concept")
+
+    def test_grounds_wrong_target(self):
+        # Constrained to Concept — an Observation does not GROUND a Component.
+        with pytest.raises(ValueError, match="requires target"):
+            validate_relation("GROUNDS", "Observation", "Component")
+
     def test_composes_decomposes_concept_only(self):
         validate_relation("COMPOSES", "Concept", "Concept")
         validate_relation("DECOMPOSES", "Concept", "Concept")
@@ -276,9 +289,27 @@ class TestRelationValidation:
             validate_relation("COMPOSES", "Concept", "Component")
 
     def test_supersedes_same_type_valid(self):
-        validate_relation("SUPERSEDES", "Hypothesis", "Hypothesis")
-        validate_relation("SUPERSEDES", "Concept", "Concept")
-        validate_relation("SUPERSEDES", "Note", "Note")
+        why = {"revision_why": "found a clearer framing"}
+        validate_relation("SUPERSEDES", "Hypothesis", "Hypothesis", why)
+        validate_relation("SUPERSEDES", "Concept", "Concept", why)
+        validate_relation("SUPERSEDES", "Note", "Note", why)
+
+    def test_supersedes_requires_revision_why(self):
+        with pytest.raises(ValueError, match="requires property 'revision_why'"):
+            validate_relation("SUPERSEDES", "Concept", "Concept")
+
+    def test_supersedes_empty_revision_why_rejected(self):
+        with pytest.raises(ValueError, match="Invalid value"):
+            validate_relation(
+                "SUPERSEDES", "Concept", "Concept", {"revision_why": "   "}
+            )
+
+    def test_supersedes_revision_why_returned(self):
+        result = validate_relation(
+            "SUPERSEDES", "Concept", "Concept",
+            {"revision_why": "the v1 view missed a second failover tier"},
+        )
+        assert result["revision_why"] == "the v1 view missed a second failover tier"
 
     def test_supersedes_cross_type_rejected(self):
         with pytest.raises(ValueError, match="share a type"):

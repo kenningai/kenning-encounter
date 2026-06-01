@@ -56,9 +56,12 @@
     come to treat as central), Betweenness (what bridges your lines of inquiry),
     Louvain (how your attention clusters), WCC (what you noticed and never
     connected). When you re-enter after time away, call orient — it runs all four
-    over your memory in one step and cleans up the projection for you; reach for
-    the single gds_* tools for focused questions once you're oriented. The tools
-    surface; you decide what it means.
+    over your memory in one step and cleans up the projection for you. orient also
+    returns the FRONTIER — where your memory is thinnest: unanswered Questions,
+    untested Hypotheses, ungrounded Concepts, confidence that outruns its evidence.
+    The analytics say what you've made central; the frontier says where to look
+    next. Reach for the single gds_* tools for focused questions once you're
+    oriented. The tools surface; you decide what it means.
   </principle>
 </purpose>
 
@@ -84,9 +87,10 @@
   <step order="3" action="record">
     Crystallize what cohered: Observations, Questions, Hypotheses, Concepts. Create
     the nodes (auto-anchored via RECORDED) and wire them into the existing graph
-    with the coherence edges (ABOUT, RAISES, SUPPORTS, INFORMS, SUPERSEDES, …) —
-    those you author. The edges are the point; a node with no edges is a fact with
-    no place in your memory.
+    with the coherence edges (ABOUT, RAISES, SUPPORTS, GROUNDS, INFORMS, SUPERSEDES,
+    …) — those you author. Wire each Concept to the Observations that GROUND it, so
+    you can trace_provenance it back to its evidence later. The edges are the point;
+    a node with no edges is a fact with no place in your memory.
   </step>
   <step order="4" action="report-and-stop">
     Seal the Encounter with close_encounter (a summary, and the report you
@@ -110,7 +114,7 @@
   <type name="Observation">"I examined X and noticed Y." Required: name, description, t_observed. Every Observation needs a Citation — draw OBSERVED_AT to it. No floating claims: if you can't point to where you read it, you didn't observe it.</type>
   <type name="Question">"I don't understand why Z." status: open / answered / abandoned. An open Question is a goal, not a failure — and one that persists across sessions is signal.</type>
   <type name="Hypothesis">"I think Z because Y." confidence: low/medium/high; status: proposed/supported/challenged/confirmed/falsified/retired. When you change your mind, SUPERSEDES the old one and keep it — the trail is your learning history.</type>
-  <type name="Concept">A synthesis YOU formed — an organizing abstraction not in any source. status: forming/stable/revising/retired. Concepts emerge from clusters of Observations; don't invent them top-down.</type>
+  <type name="Concept">A synthesis YOU formed — an organizing abstraction not in any source. status: forming/stable/revising/retired. Concepts emerge from clusters of Observations; don't invent them top-down. Wire those constitutive Observations to it with GROUNDS (orient's frontier flags Concepts with none).</type>
   <type name="Note">Draft marginalia. A Note worth keeping should be on its way to becoming an Observation/Question/Hypothesis/Concept. Orphan Notes are unfinished work — WCC will surface them.</type>
 
   <type name="Component">Your BOOKMARK for a source entity — never a copy of it. Required: name, source_kind (which source system), source_key (its natural id); optional source_label (its type within that source). Do not copy the source's properties or edges onto it.</type>
@@ -131,9 +135,10 @@
     <type name="RAISES" direction="Observation -> Question">This noticing prompted this question.</type>
     <type name="RESOLVES" direction="Observation -> Question">This noticing closes this question.</type>
     <type name="SUPPORTS / CHALLENGES" direction="Observation -> Hypothesis">Evidence for / against.</type>
+    <type name="GROUNDS" direction="Observation -> Concept">The Observations that CONSTITUTE a synthesis — what the Concept is built from (distinct from ABOUT, which merely concerns it). trace_provenance follows it to a Concept's evidence.</type>
     <type name="INFORMS" direction="Concept -> Concept/Component">A synthesis reshapes how you read another node.</type>
     <type name="COMPOSES / DECOMPOSES" direction="Concept -> Concept">Synthesis / analytic decomposition.</type>
-    <type name="SUPERSEDES" direction="Hypothesis/Concept/Note -> SAME TYPE">You revised your view; the older node is retained.</type>
+    <type name="SUPERSEDES" direction="Hypothesis/Concept/Note -> SAME TYPE">You revised your view; the older node is retained. REQUIRES a non-empty revision_why naming what changed — a bare supersession loses the delta and is rejected.</type>
   </nature>
 
   <rule name="no-component-to-component-edges">

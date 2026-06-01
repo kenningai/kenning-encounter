@@ -242,28 +242,35 @@ def create_mcp_server(
             description=(
                 "List of coherence relations. Each must have 'source' (name), "
                 "'target' (name), 'type' (one of: ABOUT, OBSERVED_AT, RAISES, RESOLVES, "
-                "SUPPORTS, CHALLENGES, INFORMS, COMPOSES, DECOMPOSES, SUPERSEDES). "
+                "SUPPORTS, CHALLENGES, GROUNDS, INFORMS, COMPOSES, DECOMPOSES, SUPERSEDES). "
                 "Direction is enforced — e.g. ABOUT: Observation/Note/Question/Hypothesis "
                 "-> Component/Concept; SUPPORTS/CHALLENGES: Observation -> Hypothesis; "
-                "SUPERSEDES: same-type -> same-type. Provenance edges (NEXT_ENCOUNTER, "
-                "RECORDED, CONSULTED) are auto-written and rejected here. "
-                "Use list_relation_types to see all constraints."
+                "GROUNDS: Observation -> Concept (the observations that constitute a "
+                "synthesis); SUPERSEDES: same-type -> same-type, and REQUIRES a non-empty "
+                "'properties': {'revision_why': '...'} naming what shifted and why. "
+                "Provenance edges (NEXT_ENCOUNTER, RECORDED, CONSULTED) are auto-written "
+                "and rejected here. Use list_relation_types to see all constraints."
             ),
         ),
     ) -> ToolResult:
         """Create coherence relationships — the agent's judgment, authored.
 
         These are the interior of the encounter: what this noticing concerns
-        (ABOUT), what evidence supports/challenges (SUPPORTS/CHALLENGES), how a
-        synthesis reshapes a bookmark (INFORMS), what you revised (SUPERSEDES).
-        A noticed relation between two source entities must be MEDIATED by an
-        Observation (two ABOUT edges) — never a direct Component->Component edge.
+        (ABOUT), what evidence supports/challenges (SUPPORTS/CHALLENGES), the
+        Observations that constitute a synthesis (GROUNDS), how a synthesis
+        reshapes a bookmark (INFORMS), what you revised (SUPERSEDES — which
+        REQUIRES a non-empty revision_why naming what shifted). A noticed relation
+        between two source entities must be MEDIATED by an Observation (two ABOUT
+        edges) — never a direct Component->Component edge.
 
         Example:
         {
             "relations": [
                 {"source": "All prod services depend on node-02", "target": "node-02 bookmark", "type": "ABOUT"},
-                {"source": "All prod services depend on node-02", "target": "node-02 is a single point of failure", "type": "SUPPORTS"}
+                {"source": "All prod services depend on node-02", "target": "node-02 is a single point of failure", "type": "SUPPORTS"},
+                {"source": "All prod services depend on node-02", "target": "Failover topology", "type": "GROUNDS"},
+                {"source": "Failover topology v2", "target": "Failover topology", "type": "SUPERSEDES",
+                 "properties": {"revision_why": "Found a second failover tier the v1 view missed."}}
             ]
         }
         """
@@ -330,6 +337,34 @@ def create_mcp_server(
         """
         async with _tool_errors("find_by_name"):
             result = await agent_memory.find_by_name(names=names, limit=limit)
+            return _json_result(result)
+
+    @mcp.tool(
+        name=ns + "trace_provenance",
+        annotations=ToolAnnotations(
+            title="Trace Provenance", readOnlyHint=True,
+            destructiveHint=False, idempotentHint=True, openWorldHint=True,
+        ),
+    )
+    async def trace_provenance(
+        name: str = Field(..., description="Exact name of the node to trace."),
+        depth: int = Field(default=3, ge=1, le=6, description="How far back to walk the grounding subtree (default 3, max 6)."),
+    ) -> ToolResult:
+        """Walk a node's grounding subtree — what this node rests on.
+
+        Follows the authored coherence edges (not the auto-written spine) from
+        the named node out to a bounded depth, returning the reachable grounding
+        nodes and the edges among them. A Concept resolves to the Observations
+        that GROUND it and the Citations behind them; a Hypothesis to what
+        SUPPORTS/CHALLENGES it; a Question to what RAISES/RESOLVES it; any node
+        to the SUPERSEDES trail it heads. Each node is annotated with the
+        Encounter that recorded it — provenance carries both what grounds a node
+        and when it entered your time.
+
+        Example: {"name": "Failover topology", "depth": 3}
+        """
+        async with _tool_errors("trace_provenance"):
+            result = await agent_memory.trace_provenance(name=name, depth=depth)
             return _json_result(result)
 
     @mcp.tool(
@@ -684,6 +719,11 @@ def create_mcp_server(
         Encounters into artificial hubs never skew the reading. PageRank = what
         you treat as central. Betweenness = what bridges your inquiries.
         Louvain = your chapters. WCC = what you noticed and never connected.
+
+        It also returns the epistemic FRONTIER (derived from structure, not GDS):
+        unanswered Questions, untested Hypotheses, ungrounded Concepts,
+        confidence/evidence dissonance, and contested Hypotheses. Centrality says
+        what you are; the frontier says where to look next.
 
         Call this FIRST when you wake, before your first advance_encounter.
         Within the waking, use the single gds_* tools for focused questions.

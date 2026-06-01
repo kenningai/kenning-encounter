@@ -17,6 +17,19 @@ def _neo4j_datetime_to_str(val: Any) -> str | None:
     return val.iso_format()
 
 
+def _clean_edge_props(raw: Any) -> dict[str, Any]:
+    """Strip the auto-set t_created and ISO-convert datetimes on an edge's
+    property map. Returns the authored properties only (e.g. revision_why on
+    SUPERSEDES) — empty dict when an edge carries none. Lets the re-entry and
+    provenance reads surface WHY an edge exists, not just its type."""
+    props = dict(raw or {})
+    props.pop("t_created", None)
+    return {
+        k: (_neo4j_datetime_to_str(v) if hasattr(v, "iso_format") else v)
+        for k, v in props.items()
+    }
+
+
 # -- Node Type Enum -----------------------------------------------------------
 
 class NodeType(str, Enum):
@@ -58,6 +71,7 @@ class RelationType(str, Enum):
     RESOLVES = "RESOLVES"
     SUPPORTS = "SUPPORTS"
     CHALLENGES = "CHALLENGES"
+    GROUNDS = "GROUNDS"
     INFORMS = "INFORMS"
     COMPOSES = "COMPOSES"
     DECOMPOSES = "DECOMPOSES"
@@ -240,6 +254,18 @@ RELATION_SCHEMAS: dict[str, dict[str, Any]] = {
         "target_types": {"Hypothesis"},
         "properties": {},
     },
+    "GROUNDS": {
+        # An Observation that was a CONSTITUTIVE INPUT to a Concept's synthesis —
+        # the provenance rung from a synthesized Concept down to the observations
+        # that produced it. Distinct in kind from ABOUT (which CONCERNS a Concept)
+        # and from INFORMS (Concept -> Concept lateral influence): a different
+        # legal shape means a different relation, so it earns its own edge rather
+        # than overloading INFORMS. trace_provenance follows it to a Concept's
+        # grounding.
+        "source_types": {"Observation"},
+        "target_types": {"Concept"},
+        "properties": {},
+    },
     "INFORMS": {
         "source_types": {"Concept"},
         "target_types": {"Concept", "Component"},
@@ -259,7 +285,13 @@ RELATION_SCHEMAS: dict[str, dict[str, Any]] = {
         "source_types": {"Hypothesis", "Concept", "Note"},
         "target_types": {"Hypothesis", "Concept", "Note"},
         "same_type": True,
-        "properties": {},
+        # revision_why is REQUIRED and must be non-empty. A supersession records
+        # not just THAT understanding shifted but WHY — a bare SUPERSEDES loses the
+        # delta and is a structural lie (collapse without held content). The why
+        # enters the substrate, wired to the how; the guarded write enforces it.
+        "properties": {"revision_why": str},
+        "required_properties": {"revision_why"},
+        "validators": {"revision_why": lambda v: isinstance(v, str) and bool(v.strip())},
     },
 }
 
@@ -579,7 +611,8 @@ class Neo4jAgentMemory:
             "MATCH (a)-[r]-(nbr) WHERE NOT type(r) IN $process_edges "
             "RETURN DISTINCT startNode(r).name AS from_name, "
             "       labels(startNode(r))[0] AS from_type, type(r) AS rel, "
-            "       endNode(r).name AS to_name, labels(endNode(r))[0] AS to_type "
+            "       endNode(r).name AS to_name, labels(endNode(r))[0] AS to_type, "
+            "       properties(r) AS rel_props "
             "LIMIT $edge_limit",
             {
                 "recent": recent,
@@ -614,18 +647,121 @@ class Neo4jAgentMemory:
                 out.append(row)
             return out
 
+        # Coherence edges carry their authored properties (e.g. revision_why on
+        # SUPERSEDES) so re-entry sees WHY an edge exists, not just its type.
+        coherence_rows = []
+        for r in coherence_edges.records:
+            row = {
+                "from_name": r["from_name"], "from_type": r["from_type"],
+                "rel": r["rel"],
+                "to_name": r["to_name"], "to_type": r["to_type"],
+            }
+            props = _clean_edge_props(r["rel_props"])
+            if props:
+                row["props"] = props
+            coherence_rows.append(row)
+
         return {
             "recent_encounters": _rows(recent_encounters, ["name", "t_exist", "summary", "report"]),
             "open_questions": _rows(open_questions, ["name", "description", "priority", "t_raised"]),
             "live_hypotheses": _rows(live_hypotheses, ["name", "description", "confidence", "status", "t_proposed"]),
             "recently_touched_concepts": _rows(recent_concepts, ["name", "description", "status", "category"]),
-            "coherence_edges": _rows(coherence_edges, ["from_name", "from_type", "rel", "to_name", "to_type"]),
+            "coherence_edges": coherence_rows,
             "dissolution": (lambda d: d[0] if d else None)(_rows(dissolution, ["name", "t_exist"])),
         }
 
     # Reserved name for the orient projection. A single fixed name (not a
     # per-call one) lets a crashed prior orient be cleaned up defensively.
     _ORIENT_PROJECTION = "__agent_memory_orient__"
+
+    async def _frontier(self, limit: int = 20) -> dict[str, Any]:
+        """The epistemic frontier: where the topology is thinnest, derived from
+        existing structure (no new schema, no GDS). orient surfaces what you
+        treat as central; the frontier surfaces where one more Observation would
+        move the needle most — turning the self-portrait from descriptive to
+        directive. Each signal is a fact-that-reads-as-a-question; the agent
+        decides what to do with it. Surfaces — never authors.
+
+        - unanswered_questions: open Questions nothing RESOLVES yet.
+        - untested_hypotheses: live Hypotheses with no SUPPORTS and no CHALLENGES.
+        - ungrounded_concepts: Concepts no Observation GROUNDS or is ABOUT — a
+          guess wearing the costume of understanding.
+        - confidence_dissonance: a node's authored confidence/status outrunning
+          its structural support (confidence:high on ≤1 SUPPORTS; stable with no
+          observational grounding at all — neither GROUNDS nor ABOUT) — the
+          authored claim and the evidence weight disagree. The grounding arm is
+          ABOUT-aware so it does not flood on a substrate that predates GROUNDS.
+        - contested_hypotheses: Hypotheses carrying BOTH support and challenge —
+          live tension already in the substrate, worth revisiting.
+        """
+        unanswered = await self.driver.execute_query(
+            "MATCH (q:Question) WHERE (q.status = 'open' OR q.status IS NULL) "
+            "AND NOT (:Observation)-[:RESOLVES]->(q) "
+            "RETURN q.name AS name, q.description AS description "
+            "ORDER BY q.t_raised DESC LIMIT $limit",
+            {"limit": limit},
+            routing_=RoutingControl.READ,
+        )
+        untested = await self.driver.execute_query(
+            "MATCH (h:Hypothesis) "
+            "WHERE (h.status IS NULL OR h.status IN ['proposed', 'challenged']) "
+            "AND NOT (:Observation)-[:SUPPORTS]->(h) "
+            "AND NOT (:Observation)-[:CHALLENGES]->(h) "
+            "RETURN h.name AS name, h.description AS description, "
+            "       h.confidence AS confidence "
+            "ORDER BY h.t_proposed DESC LIMIT $limit",
+            {"limit": limit},
+            routing_=RoutingControl.READ,
+        )
+        ungrounded = await self.driver.execute_query(
+            "MATCH (c:Concept) "
+            "WHERE NOT (:Observation)-[:GROUNDS]->(c) "
+            "AND NOT (:Observation)-[:ABOUT]->(c) "
+            "RETURN c.name AS name, c.description AS description, "
+            "       c.status AS status "
+            "LIMIT $limit",
+            {"limit": limit},
+            routing_=RoutingControl.READ,
+        )
+        dissonance = await self.driver.execute_query(
+            "CALL () { "
+            "  MATCH (h:Hypothesis) WHERE h.confidence = 'high' "
+            "  WITH h, COUNT { (:Observation)-[:SUPPORTS]->(h) } AS sup "
+            "  WHERE sup <= 1 "
+            "  RETURN h.name AS name, 'Hypothesis' AS type, "
+            "         'confidence:high, ' + toString(sup) + ' SUPPORTS' AS signal "
+            "  UNION "
+            "  MATCH (c:Concept) WHERE c.status = 'stable' "
+            "  AND NOT (:Observation)-[:GROUNDS]->(c) "
+            "  AND NOT (:Observation)-[:ABOUT]->(c) "
+            "  RETURN c.name AS name, 'Concept' AS type, "
+            "         'status:stable, no observational grounding' AS signal "
+            "} "
+            "RETURN name, type, signal LIMIT $limit",
+            {"limit": limit},
+            routing_=RoutingControl.READ,
+        )
+        contested = await self.driver.execute_query(
+            "MATCH (h:Hypothesis) "
+            "WHERE (:Observation)-[:SUPPORTS]->(h) "
+            "AND (:Observation)-[:CHALLENGES]->(h) "
+            "RETURN h.name AS name, h.description AS description, "
+            "       h.status AS status "
+            "LIMIT $limit",
+            {"limit": limit},
+            routing_=RoutingControl.READ,
+        )
+
+        def _rows(result, fields):
+            return [{f: r[f] for f in fields} for r in result.records]
+
+        return {
+            "unanswered_questions": _rows(unanswered, ["name", "description"]),
+            "untested_hypotheses": _rows(untested, ["name", "description", "confidence"]),
+            "ungrounded_concepts": _rows(ungrounded, ["name", "description", "status"]),
+            "confidence_dissonance": _rows(dissonance, ["name", "type", "signal"]),
+            "contested_hypotheses": _rows(contested, ["name", "description", "status"]),
+        }
 
     async def orient(self, result_limit: int = 20) -> dict[str, Any]:
         """The Exist read: one structural self-portrait over the coherence
@@ -643,8 +779,13 @@ class Neo4jAgentMemory:
 
         PageRank = what you have come to treat as central. Betweenness = what
         bridges your lines of inquiry. Louvain = your chapters. WCC = what you
-        noticed and never connected. Within the Exist, reach for the single
-        gds_* tools when a specific question arises; this is the opening survey.
+        noticed and never connected. Alongside the spread it returns the
+        epistemic FRONTIER — where your topology is thinnest and one more
+        Observation would move the needle most (unanswered Questions, untested
+        Hypotheses, ungrounded Concepts, confidence/evidence dissonance, contested
+        Hypotheses). Centrality says what you are; the frontier says where to look
+        next. Within the Exist, reach for the single gds_* tools when a specific
+        question arises; this is the opening survey.
         """
         proj = self._ORIENT_PROJECTION
         coherence_rels = [r.value for r in RelationType if r.value not in PROCESS_EDGES]
@@ -707,6 +848,10 @@ class Neo4jAgentMemory:
                     routing_=RoutingControl.READ,
                 )
                 out[key] = [dict(r) for r in res.records]
+            # The frontier rides along with the survey: derived from existing
+            # structure, not the GDS projection, so it needs no projection of its
+            # own. Where you are central, and where you are thin, in one read.
+            out["frontier"] = await self._frontier(limit=result_limit)
             return out
         finally:
             await self.driver.execute_query(
@@ -1108,18 +1253,107 @@ class Neo4jAgentMemory:
                 {"names": [e["name"] for e in entities]},
                 routing_=RoutingControl.READ,
             )
-            relations = [
-                {
+            relations = []
+            for r in rel_result.records:
+                rel: dict[str, Any] = {
                     "source": r["source"],
                     "target": r["target"],
                     "type": r["type"],
                 }
-                for r in rel_result.records
-            ]
+                props = _clean_edge_props(r["props"])
+                if props:
+                    rel["props"] = props
+                relations.append(rel)
         else:
             relations = []
 
         return {"entities": entities, "relations": relations}
+
+    async def trace_provenance(self, name: str, depth: int = 3) -> dict[str, Any]:
+        """Walk a node's grounding subtree — what this node rests on, surfaced.
+
+        From the named node, traverse the authored coherence edges (everything
+        but the auto-written PROCESS_EDGES) out to a bounded depth, returning the
+        reachable grounding nodes and the edges among them. This makes the
+        substrate's own epistemic structure queryable from within: a Concept
+        resolves to the Observations that GROUND it and the Citations behind those
+        Observations; a Hypothesis to what SUPPORTS/CHALLENGES it; a Question to
+        what RAISES/RESOLVES it; and any node to the SUPERSEDES trail it heads.
+        Each node is annotated with the Encounter that recorded it (anchored_to),
+        so provenance carries both WHAT grounds a node and WHEN it entered your
+        time. Surfaces — never authors; writes nothing.
+        """
+        depth = max(1, min(depth, 6))  # bound the walk; the spine guards itself
+        process_edges = sorted(PROCESS_EDGES)
+
+        root = await self.driver.execute_query(
+            "MATCH (n {name: $name}) RETURN n.name AS name, labels(n)[0] AS type LIMIT 1",
+            {"name": name},
+            routing_=RoutingControl.READ,
+        )
+        if not root.records:
+            raise ValueError(f"Node '{name}' not found")
+        root_row = {"name": root.records[0]["name"], "type": root.records[0]["type"]}
+
+        # Edges along bounded grounding paths. The depth bound is structural (a
+        # server-clamped int, never user text) so it interpolates safely via lit.
+        edges_res = await self.driver.execute_query(
+            lit(
+                "MATCH (start {name: $name}) "
+                f"MATCH path = (start)-[rels*1..{depth}]-(node) "
+                "WHERE all(r IN rels WHERE NOT type(r) IN $process_edges) "
+                "UNWIND relationships(path) AS r "
+                "RETURN DISTINCT startNode(r).name AS from_name, "
+                "       labels(startNode(r))[0] AS from_type, type(r) AS rel, "
+                "       endNode(r).name AS to_name, labels(endNode(r))[0] AS to_type, "
+                "       properties(r) AS rel_props "
+                "LIMIT 500"
+            ),
+            {"name": name, "process_edges": process_edges},
+            routing_=RoutingControl.READ,
+        )
+
+        # Reachable nodes (depth 0 includes the root itself) with their anchoring
+        # Encounter. Auto-anchoring is ON-CREATE-only, so a node has at most one
+        # RECORDED/CONSULTED edge; collect defensively and take the first.
+        nodes_res = await self.driver.execute_query(
+            lit(
+                "MATCH (start {name: $name}) "
+                f"MATCH path = (start)-[rels*0..{depth}]-(node) "
+                "WHERE all(r IN rels WHERE NOT type(r) IN $process_edges) "
+                "WITH DISTINCT node "
+                "OPTIONAL MATCH (enc:Encounter)-[:RECORDED|CONSULTED]->(node) "
+                "WITH node, collect(DISTINCT enc.name) AS encs "
+                "RETURN node.name AS name, labels(node)[0] AS type, "
+                "       node.description AS description, "
+                "       CASE WHEN size(encs) = 0 THEN null ELSE encs[0] END AS anchored_to "
+                "LIMIT 500"
+            ),
+            {"name": name, "process_edges": process_edges},
+            routing_=RoutingControl.READ,
+        )
+
+        edges = []
+        for r in edges_res.records:
+            row: dict[str, Any] = {
+                "from_name": r["from_name"], "from_type": r["from_type"],
+                "rel": r["rel"],
+                "to_name": r["to_name"], "to_type": r["to_type"],
+            }
+            props = _clean_edge_props(r["rel_props"])
+            if props:
+                row["props"] = props
+            edges.append(row)
+
+        nodes = [
+            {
+                "name": r["name"], "type": r["type"],
+                "description": r["description"], "anchored_to": r["anchored_to"],
+            }
+            for r in nodes_res.records
+        ]
+
+        return {"root": root_row, "depth": depth, "nodes": nodes, "edges": edges}
 
     async def list_vocabulary(self) -> dict[str, list[str]]:
         """Distinct open-vocabulary values in use: Citation.kind,
