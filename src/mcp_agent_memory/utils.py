@@ -138,7 +138,7 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
     config["neo4j_database"] = (
         args.database
         or os.getenv("NEO4J_DATABASE")
-        or _default("neo4j_database", "agent_memory")
+        or _default("neo4j_database", "agent-memory")
     )
 
     # Transport

@@ -6,7 +6,7 @@ WORKDIR /app
 
 # Install from local source (the package is not published to PyPI). Copy only
 # what the build needs so the image rebuilds cleanly without the venv/test tree.
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 RUN uv pip install --system .
 

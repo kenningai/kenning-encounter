@@ -31,10 +31,10 @@ services:
       # apoc-extended build, startup will fail on the download — pin back if so.
       # NEO4J_PLUGINS: '["apoc","apoc-extended","graph-data-science"]'
 
-      # Community has exactly ONE user database — you cannot CREATE DATABASE agent_memory.
-      # Name the single default database 'agent_memory' so the Agent Memory's NEO4J_DATABASE=agent_memory
+      # Community has exactly ONE user database — you cannot CREATE DATABASE agent-memory.
+      # Name the single default database 'agent-memory' so the Agent Memory's NEO4J_DATABASE=agent-memory
       # resolves instead of erroring "database does not exist".
-      NEO4J_initial_dbms_default__database: "agent_memory"
+      NEO4J_initial_dbms_default__database: "agent-memory"
 
       # Reasonable single-agent memory. The Agent Memory graph is small; GDS projections
       # live in heap. Tune later with `neo4j-admin server memory-recommendation`.
@@ -67,7 +67,7 @@ services:
 
   agent_memory:
     build: .
-    image: mcp-agent-memory:0.2.1
+    image: mcp-agent-memory:0.2.2
     container_name: agent_memory-mcp
     depends_on:
       neo4j:
@@ -78,7 +78,7 @@ services:
       NEO4J_URI: "bolt://neo4j:7687" # internal Docker DNS — no published port needed for this hop
       NEO4J_USERNAME: "neo4j"
       NEO4J_PASSWORD: "${NEO4J_AGENT_MEMORY_PASSWORD}"
-      NEO4J_DATABASE: "agent_memory"
+      NEO4J_DATABASE: "agent-memory"
       NEO4J_TRANSPORT: "http"
       NEO4J_MCP_SERVER_HOST: "0.0.0.0"
       NEO4J_MCP_SERVER_PORT: "8000"
