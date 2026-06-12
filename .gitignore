@@ -29,3 +29,4 @@ venv/
 # seal-public build output + local target pointer (machine-specific path)
 publish/.staging/
 publish/.target
+*.pdf

@@ -187,20 +187,11 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
         or 30
     )
 
-    # Stateless HTTP (streamable-http transport only). Default True: the Agent Memory's
-    # primary consumer is Claude Code (headless, spawned by n8n), which needs no
-    # session affinity. Set NEO4J_MCP_STATELESS_HTTP=false for any deployment
-    # where a session bridge sits in the path — the n8n MCP-Client node (the
-    # session-id bridge), or OpenWebUI routed through n8n — so the server issues
-    # an Mcp-Session-Id and honors the DELETE session-teardown. Under FastMCP 3
-    # the route already accepts GET/POST/DELETE in BOTH modes, so flipping this
-    # needs no monkey-patch — it only toggles whether sessions are kept.
-    if os.getenv("NEO4J_MCP_STATELESS_HTTP") is not None:
-        config["stateless_http"] = (
-            os.getenv("NEO4J_MCP_STATELESS_HTTP", "true").lower() == "true"
-        )
-    else:
-        config["stateless_http"] = True
+    # No stateless-HTTP option, by design (v0.3.0). Encounters within a session
+    # are stateful by definition — they depend on the states that preceded them
+    # (per-locus chaining, locus-scoped write targeting) — so HTTP sessions are
+    # always stateful: the server issues an Mcp-Session-Id (the locus key) and
+    # honors the DELETE session-teardown.
 
     return config
 

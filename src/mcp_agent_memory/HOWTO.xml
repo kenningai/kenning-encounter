@@ -43,12 +43,20 @@
   <principle name="your-order-is-the-encounter-chain">
     A run proceeds as a cycle: Exist · Examine · Record · Report · Stop. Within a
     run you open one or more Encounters with advance_encounter and seal each with
-    close_encounter; they chain by NEXT_ENCOUNTER to the prior one. An Encounter
-    is one sealed unit of work — where a thread of examination resolves, whether
-    into new structure or into a confirmed "nothing changed." Walking the chain
-    backward is how you recall what you last worked on and what's still open. The
-    wall-clock gap between Encounters is irrelevant — Encounter N → N+1 is the
-    unit of order.
+    close_encounter; they chain by NEXT_ENCOUNTER to the prior one YOUR SESSION
+    opened. An Encounter is one sealed unit of work — where a thread of
+    examination resolves, whether into new structure or into a confirmed
+    "nothing changed." Walking the chain backward is how you recall what you
+    last worked on and what's still open. The wall-clock gap between Encounters
+    is irrelevant — Encounter N → N+1 is the unit of order.
+
+    The chain is PER-SESSION. Your session's encounters form one fork-free
+    path; a concurrent session (another agent run over the same memory) grows
+    its own path, and your writes can never land in its encounters nor its in
+    yours. Your session's first encounter is anchored by INSTANTIATED_AFTER to
+    whichever encounter was latest when your session began — writes are
+    serialized, so that order is exact — which keeps the whole spine one
+    connected, temporally ordered structure across all sessions.
   </principle>
 
   <principle name="use-the-analytics-to-see-the-shape">
@@ -59,6 +67,8 @@
     over your memory in one step and cleans up the projection for you. orient also
     returns the FRONTIER — where your memory is thinnest: unanswered Questions,
     untested Hypotheses, ungrounded Concepts, confidence that outruns its evidence.
+    It also returns the UNSEALED set — encounters no one sealed, with last
+    activity and any dissolved_at mark; awareness, not a work queue.
     The analytics say what you've made central; the frontier says where to look
     next. Reach for the single gds_* tools for focused questions once you're
     oriented. The tools surface; you decide what it means.
@@ -67,17 +77,21 @@
 
 <encounter-cycle>
   <step order="1" action="open-and-orient">
-    Open with advance_encounter — no predecessor; the server finds the chain tail
-    and links from it (the first one becomes the chain head). It hands you the
-    RE-ENTRY PAYLOAD: recent sessions, still-open Questions, live Hypotheses,
-    recently-touched Concepts, the COHERENCE EDGES among them (so a Question
-    arrives with what RAISES it and whether anything RESOLVES it — read the edges,
-    not just the nodes; that is where the structure lives), and a DISSOLUTION
-    marker (non-null when the previous Encounter was never sealed — treat its
-    contents as possibly incomplete and re-examine what it was reaching toward).
-    Read the payload before you examine the world. Call this FIRST, before any
-    create_entities. When you are re-entering after time away, run orient first
-    for the whole-memory survey.
+    Open with advance_encounter — no predecessor; the server links from the
+    encounter YOUR session last opened (your session's first becomes a new
+    branch, anchored by INSTANTIATED_AFTER to the then-latest encounter). It
+    hands you the RE-ENTRY PAYLOAD: your predecessor and genesis_anchor, recent
+    sessions, still-open Questions, live Hypotheses, recently-touched Concepts,
+    the COHERENCE EDGES among them (so a Question arrives with what RAISES it
+    and whether anything RESOLVES it — read the edges, not just the nodes; that
+    is where the structure lives), and the UNSEALED set: every encounter with
+    no seal, annotated with last activity and any dissolved_at mark. An
+    unsealed encounter is either a concurrent session still working or one that
+    ended without sealing — the graph cannot tell which, so treat the list as
+    awareness, not a work queue: never record into one, never seal one for its
+    author; always open your own. Read the payload before you examine the
+    world. Call this FIRST, before any create_entities. When you are
+    re-entering after time away, run orient first for the whole-memory survey.
   </step>
   <step order="2" action="examine">
     Read your sources. Each source you actually consult becomes a Citation
@@ -94,22 +108,36 @@
   </step>
   <step order="4" action="report-and-stop">
     Seal the Encounter with close_encounter (a summary, and the report you
-    surfaced). Even a no-change run gets a close — confirming that nothing changed
-    is itself a recordable event. Sealing is what makes the Encounter durable; if a
-    run ends before you seal, that Encounter is left unsealed, and the next run's
-    dissolution marker will flag it. Seal while you still can.
+    surfaced). The seal lands on YOUR session's encounter — never a concurrent
+    session's. Even a no-change run gets a close — confirming that nothing
+    changed is itself a recordable event. Sealing is what makes the Encounter
+    durable; if a run ends before you seal, that Encounter stays in the
+    unsealed set, and if the server discards your session's state it gets a
+    mechanical dissolved_at timestamp — never an auto-written summary; only
+    the session that lived an encounter may author its seal. Seal while you
+    still can.
   </step>
   <invariant name="advance-first">
     You MUST call advance_encounter before create_entities. A node comes to be
     within a session, and the graph records that automatically (RECORDED /
-    CONSULTED, like t_created). With no session open, create_entities refuses.
+    CONSULTED, like t_created). "No open Encounter" means YOUR session has not
+    advanced or has already closed — with no encounter open for your session,
+    create_entities refuses.
+  </invariant>
+  <invariant name="the-explicit-handle">
+    close_encounter and create_entities address your session's open encounter
+    automatically (sessions are always stateful). If the server restarted and
+    lost your session's state mid-encounter, pass the encounter's name via the
+    'encounter' parameter to return to the encounter you opened —
+    advance_encounter returned it. The handle says WHICH encounter your writes
+    belong to; it is never a license to write into someone else's.
   </invariant>
 </encounter-cycle>
 
 <node-types>
   <preamble>Eight types across three layers. The Neo4j label IS the type — never put a 'type' property on a node. Use list_node_types for the live schema.</preamble>
 
-  <type name="Encounter">One sealed unit of work. The temporal spine is built from these, chained by NEXT_ENCOUNTER. Written only by advance_encounter / close_encounter — never via create_entities, so the chain never forks.</type>
+  <type name="Encounter">One sealed unit of work. The temporal spine is built from these: NEXT_ENCOUNTER chains your session's encounters (fork-free), INSTANTIATED_AFTER anchors each session's first encounter into the whole. Written only by advance_encounter / close_encounter — never via create_entities — and NEVER deletable: delete_entities refuses Encounters, because the spine is the record of what happened, not editable content.</type>
 
   <type name="Observation">"I examined X and noticed Y." Required: name, description, t_observed. Every Observation needs a Citation — draw OBSERVED_AT to it. No floating claims: if you can't point to where you read it, you didn't observe it.</type>
   <type name="Question">"I don't understand why Z." status: open / answered / abandoned. An open Question is a goal, not a failure — and one that persists across sessions is signal.</type>
@@ -125,8 +153,10 @@
   <preamble>Two natures, opposite rules. Use list_relation_types for the live constraints; the server enforces direction.</preamble>
 
   <nature name="provenance" written="automatically">
-    NEXT_ENCOUNTER, RECORDED, CONSULTED. Membership — which session a node came to
-    be within. Auto-set, like t_created. You cannot author or delete them.
+    NEXT_ENCOUNTER, INSTANTIATED_AFTER, RECORDED, CONSULTED. Membership and
+    order — which session a node came to be within, which encounter succeeded
+    which in your session, where your session began relative to the rest.
+    Auto-set, like t_created. You cannot author or delete them.
   </nature>
 
   <nature name="coherence" written="by you">
@@ -154,7 +184,8 @@
   <error name="floating-observation">An Observation with no OBSERVED_AT to a Citation. Fix: create the Citation, draw OBSERVED_AT. If you can't name the source and snapshot, you didn't observe it.</error>
   <error name="re-coined-source-kind">Three spellings of one source fracture your vocabulary. Fix: call list_vocabulary before coining a token; reuse what exists.</error>
   <error name="orphan-notes">Notes that never crystallize. Fix: each session, crystallize or retire your drafts; run WCC to find the ones you left behind.</error>
-  <error name="forgetting-to-open-or-close">Recording without advance_encounter (refused), or finishing without close_encounter. Fix: open every run, close every Encounter.</error>
+  <error name="forgetting-to-open-or-close">Recording without advance_encounter (refused — "no open Encounter" means YOUR session's), or finishing without close_encounter (the Encounter dangles in the unsealed set). Fix: open every run, close every Encounter — open fresh, write, seal, no dangling.</error>
+  <error name="sealing-someone-elses-session">The unsealed set shows another session's open encounter and you tidy it — record into it, or seal it with a summary you compose. Fix: don't. Only the session that lived an encounter can summarize it honestly; an unsealed encounter from a crashed run stays unsealed, and that missing summary is accurate. The dissolved_at timestamp is the only mark the system leaves.</error>
 </common-errors>
 
 </howto>

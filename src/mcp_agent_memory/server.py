@@ -16,6 +16,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from fastmcp.server import FastMCP
+from fastmcp.server.context import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools.base import ToolResult
 from mcp.types import TextContent, ToolAnnotations
@@ -76,6 +77,20 @@ def _text_result(text: str, structured=None) -> ToolResult:
     )
 
 
+def _locus_key(ctx: Context) -> str | None:
+    """The calling locus's identity for locus-scoped write targeting.
+
+    The MCP session id: stable for the lifetime of a stdio connection (one
+    process, one client, one locus) and of an HTTP session (the
+    mcp-session-id header — HTTP is always stateful here, by design). None
+    when no session exists at all.
+    """
+    try:
+        return ctx.session_id
+    except RuntimeError:
+        return None
+
+
 # -- Server Factory -----------------------------------------------------------
 
 def create_mcp_server(
@@ -107,25 +122,34 @@ def create_mcp_server(
         ),
         recent: int = Field(default=5, ge=1, le=50, description="How many recent encounters to summarize in the re-entry payload."),
         limit: int = Field(default=20, ge=1, le=100, description="Max open Questions / live Hypotheses / recent Concepts to return."),
+        ctx: Context | None = None,
     ) -> ToolResult:
         """Open a new Encounter and orient — the sole writer of the temporal spine.
 
-        Takes NO predecessor: the server finds the chain tail and appends in one
-        transaction (first-ever encounter becomes the chain head). Opening an
-        encounter IS orienting — this returns the re-entry payload: the chain
-        tail and predecessor, recent encounter summaries, still-open Questions,
-        live (proposed/challenged) Hypotheses, and recently-touched Concepts.
+        Takes NO predecessor: the server links from the encounter THIS locus
+        (this session) last opened — per-locus chaining. A first-of-locus
+        encounter has no incoming NEXT_ENCOUNTER and is genesis-bound via
+        INSTANTIATED_AFTER to the encounter latest when this locus began, so
+        parallel loci are branches of one connected becoming, never forks of
+        one chain and never floating fragments. Opening an encounter
+        IS orienting — this returns the re-entry payload: recent encounter
+        summaries, still-open Questions, live (proposed/challenged) Hypotheses,
+        recently-touched Concepts, and the unsealed set (encounters without a
+        seal — live siblings or orphans; never join one, always open your own).
         Read it before examining the world. Your past encounters are your memory.
 
         Call this to open each Encounter, before any create_entities — a node
-        comes to be within an encounter, and the graph records that
+        comes to be within ITS encounter, and the graph records that
         constitutively. Once per waking, call orient first for the global
         structural survey; this opens the work-units within that waking.
 
         Example: {"name": "Encounter 2026-05-29T14:00 — service failover thread"}
         """
         async with _tool_errors("advance_encounter"):
-            result = await agent_memory.advance_encounter(name=name, recent=recent, limit=limit)
+            result = await agent_memory.advance_encounter(
+                name=name, recent=recent, limit=limit,
+                locus_key=_locus_key(ctx) if ctx else None,
+            )
             return _json_result(result)
 
     @mcp.tool(
@@ -138,19 +162,35 @@ def create_mcp_server(
     async def close_encounter(
         summary: str | None = Field(default=None, description="What this encounter cohered around — the Record in brief."),
         report: str | None = Field(default=None, description="The Report/Stop output surfaced this encounter."),
+        encounter: str | None = Field(
+            default=None,
+            description=(
+                "Explicit Encounter name to seal — only needed when the server "
+                "lost your session's state (e.g. it restarted) and you are "
+                "returning to seal the encounter you lived. Defaults to the "
+                "encounter THIS session opened."
+            ),
+        ),
+        ctx: Context | None = None,
     ) -> ToolResult:
-        """Annotate the current Encounter at Report/Stop.
+        """Seal YOUR encounter at Report/Stop.
 
-        Writes only summary/report onto the current (tail) Encounter — never a
-        node, never a NEXT_ENCOUNTER edge, so the spine stays sole-written by
-        advance_encounter. Even a confirmation-only run should close with a
-        summary — the absence of change is a temporal event worth recording.
+        Addresses the encounter this locus (this session) opened — never the
+        global tail, so a parallel sibling's advance cannot capture your seal.
+        Writes only summary/report — never a node, never a NEXT_ENCOUNTER edge;
+        the spine stays sole-written by advance_encounter. Even a
+        confirmation-only run should close with a summary — the absence of
+        change is a temporal event worth recording. Seal only what you lived:
+        never author a summary for another locus's encounter.
 
         Example: {"summary": "Confirmed all four services still depend on node-02.",
                   "report": "No change since encounter N-1; SPOF question stays open."}
         """
         async with _tool_errors("close_encounter"):
-            result = await agent_memory.close_encounter(summary=summary, report=report)
+            result = await agent_memory.close_encounter(
+                summary=summary, report=report, encounter=encounter,
+                locus_key=_locus_key(ctx) if ctx else None,
+            )
             return _json_result(result)
 
     # -- Entity Tools (semantic + reference layers) ---------------------------
@@ -173,18 +213,32 @@ def create_mcp_server(
                 "Component requires: name, source_kind, source_key (+ optional source_label). "
                 "Citation requires: name, kind. "
                 "Encounter is NOT createable here — use advance_encounter. "
-                "Nodes are auto-anchored (RECORDED/CONSULTED) to the current Encounter, "
-                "so advance_encounter must be called first. Use list_node_types for schemas."
+                "Nodes are auto-anchored (RECORDED/CONSULTED) to the Encounter THIS "
+                "session opened, so advance_encounter must be called first. "
+                "Use list_node_types for schemas."
             ),
         ),
+        encounter: str | None = Field(
+            default=None,
+            description=(
+                "Explicit Encounter name to anchor to — only needed when the "
+                "server lost your session's state (e.g. it restarted) mid-"
+                "encounter. Defaults to the encounter THIS session opened."
+            ),
+        ),
+        ctx: Context | None = None,
     ) -> ToolResult:
-        """Create semantic/reference nodes, auto-anchored to the current Encounter.
+        """Create semantic/reference nodes, auto-anchored to YOUR open Encounter.
 
         Epistemic nodes (Observation/Question/Hypothesis/Concept/Note) get a
-        RECORDED edge from the open Encounter; Citations get CONSULTED. Component
-        bookmarks are not anchored (they enter your time through the nodes that
-        are ABOUT them). Anchoring fires on creation only — re-touching an
-        existing node later never re-dates its birth. Idempotent via MERGE on name.
+        RECORDED edge from the encounter this locus (this session) opened —
+        never the global tail, so your nodes cannot be misattributed to a
+        parallel sibling's encounter; Citations get CONSULTED. "No open
+        Encounter" means THIS session has not advanced or has already closed.
+        Component bookmarks are not anchored (they enter your time through the
+        nodes that are ABOUT them). Anchoring fires on creation only —
+        re-touching an existing node later never re-dates its birth. Idempotent
+        via MERGE on name.
 
         Example:
         {
@@ -199,7 +253,10 @@ def create_mcp_server(
         }
         """
         async with _tool_errors("create_entities"):
-            result = await agent_memory.create_entities(entities)
+            result = await agent_memory.create_entities(
+                entities, encounter=encounter,
+                locus_key=_locus_key(ctx) if ctx else None,
+            )
             return _json_result(result)
 
     @mcp.tool(
@@ -215,11 +272,13 @@ def create_mcp_server(
             description="Exact names of entities to delete. DETACH DELETE — removes node and all relationships.",
         ),
     ) -> ToolResult:
-        """Delete nodes by exact name. Destructive and irreversible.
+        """Delete semantic/reference nodes by exact name. Destructive and irreversible.
 
         Returns what was deleted (name, type, description, relationship count)
         before deletion occurs, so the operation is auditable. Prefer SUPERSEDES
         over deletion — the trail of superseded views is your learning history.
+        Encounters are NOT deletable: the spine is the record of lived time,
+        not editable content — no tool deletes it.
 
         Example: {"names": ["Stale Note about service naming"]}
         """
@@ -723,7 +782,10 @@ def create_mcp_server(
         It also returns the epistemic FRONTIER (derived from structure, not GDS):
         unanswered Questions, untested Hypotheses, ungrounded Concepts,
         confidence/evidence dissonance, and contested Hypotheses. Centrality says
-        what you are; the frontier says where to look next.
+        what you are; the frontier says where to look next. And the UNSEALED set:
+        encounters with no seal, annotated with last-activity time — each is a
+        live sibling locus or an orphaned dissolution; the graph cannot tell
+        which and does not classify. Never join one — always open your own.
 
         Call this FIRST when you wake, before your first advance_encounter.
         Within the waking, use the single gds_* tools for focused questions.
@@ -766,7 +828,6 @@ async def main(
     allow_origins: list[str] = [],
     allowed_hosts: list[str] = [],
     read_timeout: int = 30,
-    stateless_http: bool = True,
 ) -> None:
     logger.info("Starting Agent Memory MCP Server")
     logger.info(f"Connecting to Neo4j at: {neo4j_uri}")
@@ -800,10 +861,9 @@ async def main(
         Middleware(
             CORSMiddleware,
             allow_origins=allow_origins,
-            # DELETE is the stateful session-teardown verb. Harmless under
-            # stateless mode; required the moment a browser-origin client
-            # (OpenWebUI cross-origin) runs against a stateful server, or its
-            # teardown DELETE preflight fails.
+            # DELETE is the session-teardown verb. HTTP sessions are always
+            # stateful (the session IS the locus), so a browser-origin client
+            # (OpenWebUI cross-origin) needs the DELETE preflight to pass.
             allow_methods=["GET", "POST", "DELETE"],
             allow_headers=["*"],
         ),
@@ -812,24 +872,42 @@ async def main(
 
     mcp = create_mcp_server(agent_memory, namespace, read_timeout=read_timeout)
 
-    match transport:
-        case "streamable-http" | "http":
-            await mcp.run_http_async(
-                host=host, port=port, path=path,
-                middleware=custom_middleware,
-                transport="streamable-http",
-                stateless_http=stateless_http,
-            )
-        case "stdio":
-            await mcp.run_stdio_async()
-        case "sse":
-            await mcp.run_http_async(
-                host=host, port=port, path=path,
-                middleware=custom_middleware,
-                transport="sse",
-            )
-        case _:
-            raise ValueError(
-                f"Unsupported transport: {transport}. "
-                "Must be one of: stdio, sse, http, streamable-http"
-            )
+    try:
+        match transport:
+            case "streamable-http" | "http":
+                # Always stateful, by design: an Encounter depends on the
+                # states that preceded it (per-locus chaining, locus-scoped
+                # writes), so the session — whose Mcp-Session-Id IS the locus
+                # key — must persist between calls. There is no stateless mode.
+                await mcp.run_http_async(
+                    host=host, port=port, path=path,
+                    middleware=custom_middleware,
+                    transport="streamable-http",
+                    stateless_http=False,
+                )
+            case "stdio":
+                await mcp.run_stdio_async()
+            case "sse":
+                await mcp.run_http_async(
+                    host=host, port=port, path=path,
+                    middleware=custom_middleware,
+                    transport="sse",
+                )
+            case _:
+                raise ValueError(
+                    f"Unsupported transport: {transport}. "
+                    "Must be one of: stdio, sse, http, streamable-http"
+                )
+    finally:
+        # Idle-MARK, never idle-seal: the server is discarding its locus state,
+        # so any encounter still open here loses its implicit addressing —
+        # stamp dissolved_at (mechanical timestamp, seal fields untouched).
+        # Best-effort: a hard kill skips this, and the unsealed set surfaced at
+        # the next orient/advance catches whatever was missed.
+        try:
+            marked = await agent_memory.mark_open_dissolved()
+            if marked:
+                logger.info(f"Marked dissolved at shutdown: {marked}")
+        except Exception as e:
+            logger.warning(f"Dissolution marking at shutdown failed: {e}")
+        await neo4j_driver.close()

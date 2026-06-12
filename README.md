@@ -23,9 +23,15 @@ re-deriving it every session.
 
 ## The three layers
 
-- **Process** — `Encounter` (one work session) chained by `NEXT_ENCOUNTER`. The
-  agent's own ordering of its memory. Written only by the guarded
-  `advance_encounter` / `close_encounter` — the spine stays a single clean chain.
+- **Process** — `Encounter` (one work session) chained by `NEXT_ENCOUNTER`
+  **per session**: each session's encounters form one clean fork-free path, and
+  a session's first encounter is anchored by `INSTANTIATED_AFTER` to whichever
+  encounter was latest when the session began (writes are serialized, so that
+  order is exact). Concurrent sessions — multiple agents over one memory —
+  therefore branch without ever corrupting each other's chains, and the whole
+  spine stays one connected, temporally ordered structure. Written only by the
+  guarded `advance_encounter` / `close_encounter`. Encounters are never
+  deletable — the spine is the record, not editable content.
 - **Semantic** — `Observation` / `Question` / `Hypothesis` / `Concept` / `Note`.
   What the agent has come to understand: noticings, open threads, working
   explanations, syntheses.
@@ -35,10 +41,15 @@ re-deriving it every session.
 
 ## Tool surface
 
-- **Session:** `advance_encounter` (opens a session, returns the re-entry payload —
-  recent sessions, open questions, live hypotheses, recent concepts),
-  `close_encounter` (annotate the session at the end).
-- **Write:** `create_entities` (auto-anchored to the open session),
+- **Session:** `advance_encounter` (opens an encounter chained from *your
+  session's* previous one; returns the re-entry payload — recent sessions, open
+  questions, live hypotheses, recent concepts, and the **unsealed set**: any
+  encounters left open elsewhere, with last-activity times), `close_encounter`
+  (seals *your session's* encounter — a concurrent session can't capture it;
+  accepts an explicit `encounter` name if the server restarted mid-session).
+  Encounters left open when the server discards session state get a mechanical
+  `dissolved_at` timestamp — never an auto-written summary.
+- **Write:** `create_entities` (auto-anchored to *your session's* open encounter),
   `create_relations` (the agent's authored links; `SUPERSEDES` carries a required
   `revision_why` — a revision records what changed and why), `delete_entities`,
   `delete_relations`.
@@ -80,8 +91,11 @@ allows one user database, so the stack names it via `initial.dbms.default_databa
 
 CLI args → env vars → defaults: `NEO4J_URL`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`,
 `NEO4J_DATABASE`, `NEO4J_TRANSPORT` (`stdio` | `streamable-http` | `sse`),
-`NEO4J_MCP_SERVER_*`, `NEO4J_NAMESPACE`, `NEO4J_READ_TIMEOUT`,
-`NEO4J_MCP_STATELESS_HTTP` (default `true`; set `false` for a session-bridged
-client that needs `Mcp-Session-Id` + `DELETE` teardown).
+`NEO4J_MCP_SERVER_*`, `NEO4J_NAMESPACE`, `NEO4J_READ_TIMEOUT`.
+
+HTTP sessions are always **stateful** — there is no stateless option, by
+design: an encounter depends on the state that preceded it (per-session
+chaining, session-scoped writes), so the `Mcp-Session-Id` carries the session
+identity and the `DELETE` teardown is honored.
 
 Single-tenant: one agent, one memory graph, one Neo4j database.
