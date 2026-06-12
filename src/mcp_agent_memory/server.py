@@ -598,10 +598,12 @@ def create_mcp_server(
     ) -> ToolResult:
         """Create a GDS graph projection for self-examination.
 
-        Projects your Agent Memory into GDS memory for PageRank, Betweenness, Louvain,
-        and WCC — run by you, on yourself. To preserve the encounter-sequential
-        direction for centrality-over-time reads, project with undirected=false
-        and include NEXT_ENCOUNTER. Always clean up with gds_drop_projection.
+        Projects your Agent Memory into GDS memory for PageRank, Betweenness, Leiden,
+        and WCC — run by you, on yourself. Scoping the projection is how you
+        formulate the question; it is yours to choose. To preserve the
+        encounter-sequential direction for centrality-over-time reads, project
+        with undirected=false and include NEXT_ENCOUNTER (note Leiden requires
+        undirected). Always clean up with gds_drop_projection.
 
         Example: {"name": "agent_memory_full"}
         Example: {"name": "concepts_only", "node_types": ["Concept", "Component"], "rel_types": ["INFORMS", "ABOUT"]}
@@ -711,20 +713,25 @@ def create_mcp_server(
             return _json_result([dict(r) for r in result.records])
 
     @mcp.tool(
-        name=ns + "gds_louvain",
+        name=ns + "gds_leiden",
         annotations=ToolAnnotations(
-            title="GDS Louvain", readOnlyHint=True,
+            title="GDS Leiden", readOnlyHint=True,
             destructiveHint=False, idempotentHint=True, openWorldHint=False,
         ),
     )
-    async def gds_louvain(
-        projection: str = Field(..., description="Name of the graph projection"),
+    async def gds_leiden(
+        projection: str = Field(..., description="Name of the graph projection (must be undirected)"),
         result_limit: int = Field(default=20, ge=1, le=1000, description="Max results (default 20)"),
     ) -> ToolResult:
-        """Run Louvain — how have you clustered your own attention? Your chapters."""
-        async with _tool_errors("gds_louvain"):
+        """Run Leiden — how have you clustered your own attention? Your chapters.
+
+        Leiden guarantees well-connected communities where Louvain can return
+        badly-connected ones — an identity instrument must not hallucinate
+        chapters. Requires an undirected projection (the default).
+        """
+        async with _tool_errors("gds_leiden"):
             result = await agent_memory.driver.execute_query(
-                "CALL gds.louvain.stream($projection) YIELD nodeId, communityId "
+                "CALL gds.leiden.stream($projection) YIELD nodeId, communityId "
                 "RETURN gds.util.asNode(nodeId).name AS node, "
                 "labels(gds.util.asNode(nodeId))[0] AS type, communityId "
                 "ORDER BY communityId, node LIMIT $result_limit",
@@ -768,20 +775,27 @@ def create_mcp_server(
     ) -> ToolResult:
         """The Exist read — one structural self-portrait, run once per waking.
 
-        Bundles the full GDS spread (PageRank, Betweenness, Louvain, WCC) over
-        the coherence subgraph into a single call, managing the projection
-        lifecycle for you — create, run all four, drop, even on failure. It
-        takes a beat; you pay it once when you wake, not per Encounter.
+        The panel is constitution, not analytics: its payload conditions the
+        next encounter's writes, so each instrument is chosen against the
+        gravity well (mass attracts authorship attracts mass). One call over
+        the coherence subgraph, projection lifecycle self-managed — create,
+        run the panel, drop, even on failure. It takes a beat; you pay it once
+        when you wake, not per Encounter.
 
-        The projection is coherence-only by construction: authored edges over
-        every node type but Encounter, so the spine/provenance edges that turn
-        Encounters into artificial hubs never skew the reading. PageRank = what
-        you treat as central. Betweenness = what bridges your inquiries.
-        Louvain = your chapters. WCC = what you noticed and never connected.
+        The readings: MASS (ArticleRank — damped accumulation). FRONTIER_MASS
+        (personalized PageRank seeded from the frontier — the same graph seen
+        from your unresolved). DIVERGENCE (well suspects: high mass the
+        frontier ignores = big because it is big; frontier_lifted: the
+        inverse). BETWEENNESS (what bridges your inquiries). LEIDEN (your
+        chapters, guaranteed well-connected). WCC (what you never connected).
+        FRAGILITY (articulation points + bridges — what holds you together).
+        WEAVE_AUDIT (high degree + low clustering = a star, not a weave).
+        DRIFT (mass vs the previous waking: risers, fallers, new_since — the
+        well visible AS a well, with velocity).
 
         It also returns the epistemic FRONTIER (derived from structure, not GDS):
         unanswered Questions, untested Hypotheses, ungrounded Concepts,
-        confidence/evidence dissonance, and contested Hypotheses. Centrality says
+        confidence/evidence dissonance, and contested Hypotheses. Mass says
         what you are; the frontier says where to look next. And the UNSEALED set:
         encounters with no seal, annotated with last-activity time — each is a
         live sibling locus or an orphaned dissolution; the graph cannot tell

@@ -17,6 +17,9 @@ from mcp_agent_memory.agent_memory import (
     PROCESS_EDGES,
     ANCHOR_FOR,
     DATETIME_CAST_PROPS,
+    compute_divergence,
+    compute_drift,
+    compute_weave_audit,
 )
 from mcp_agent_memory.utils import format_namespace
 
@@ -595,3 +598,100 @@ class TestLocusScopedWrites:
         marked = await agent_memory.mark_open_dissolved()
         assert marked == ["E1"]
         assert agent_memory._locus_open == {}
+
+
+# -- Orient panel math (v0.4.0) ------------------------------------------------
+
+def _rows(*pairs):
+    """Build score-descending stream rows from (node, score) pairs."""
+    return [
+        {"node": n, "type": "Concept", "score": s}
+        for n, s in sorted(pairs, key=lambda p: p[1], reverse=True)
+    ]
+
+
+class TestDivergence:
+    def test_well_suspect_is_high_mass_low_frontier(self):
+        mass = _rows(("hub", 9.0), ("mid", 5.0), ("edge", 1.0))
+        frontier = _rows(("edge", 9.0), ("mid", 5.0), ("hub", 1.0))
+        out = compute_divergence(mass, frontier, limit=10)
+        assert out["well_suspects"][0]["node"] == "hub"
+        assert out["well_suspects"][0]["divergence"] == 1.0
+        assert out["frontier_lifted"][0]["node"] == "edge"
+        assert out["frontier_lifted"][0]["divergence"] == -1.0
+
+    def test_aligned_frames_produce_no_divergence(self):
+        mass = _rows(("a", 9.0), ("b", 5.0), ("c", 1.0))
+        out = compute_divergence(mass, list(mass), limit=10)
+        assert out == {"well_suspects": [], "frontier_lifted": []}
+
+    def test_degenerate_inputs_return_empty(self):
+        assert compute_divergence([], [], 10) == {
+            "well_suspects": [], "frontier_lifted": [],
+        }
+        one = _rows(("only", 1.0))
+        assert compute_divergence(one, one, 10) == {
+            "well_suspects": [], "frontier_lifted": [],
+        }
+
+    def test_limit_applies_per_side(self):
+        mass = _rows(("a", 9.0), ("b", 8.0), ("c", 2.0), ("d", 1.0))
+        frontier = _rows(("d", 9.0), ("c", 8.0), ("b", 2.0), ("a", 1.0))
+        out = compute_divergence(mass, frontier, limit=1)
+        assert len(out["well_suspects"]) == 1
+        assert len(out["frontier_lifted"]) == 1
+
+
+class TestWeaveAudit:
+    def test_star_outranks_weave(self):
+        degree = _rows(("star", 10.0), ("weave", 10.0), ("leaf", 1.0))
+        coeff = [
+            {"node": "star", "coefficient": 0.0},
+            {"node": "weave", "coefficient": 0.9},
+            {"node": "leaf", "coefficient": 0.0},
+        ]
+        out = compute_weave_audit(degree, coeff, limit=10)
+        assert [r["node"] for r in out] == ["star", "weave"]  # leaf below min_degree
+        assert out[0]["star_score"] == 10.0
+        assert out[1]["star_score"] == 1.0
+
+    def test_missing_coefficient_treated_as_zero(self):
+        degree = _rows(("orphan", 5.0))
+        out = compute_weave_audit(degree, [], limit=10)
+        assert out[0]["clustering"] == 0.0
+        assert out[0]["star_score"] == 5.0
+
+    def test_min_degree_filter(self):
+        degree = _rows(("small", 2.0))
+        assert compute_weave_audit(degree, [], limit=10) == []
+
+
+class TestDrift:
+    def test_risers_fallers_and_new(self):
+        baseline = _rows(("a", 9.0), ("b", 5.0), ("c", 1.0))
+        current = _rows(("c", 9.0), ("a", 5.0), ("new-node", 3.0), ("b", 1.0))
+        out = compute_drift(current, baseline, limit=10)
+        assert out["risers"][0] == {
+            "node": "c", "type": "Concept",
+            "baseline_rank": 3, "current_rank": 1, "shift": 2,
+        }
+        assert {f["node"] for f in out["fallers"]} == {"a", "b"}
+        assert out["new_since"] == [
+            {"node": "new-node", "type": "Concept", "current_rank": 3},
+        ]
+
+    def test_no_movement(self):
+        rows = _rows(("a", 9.0), ("b", 5.0))
+        out = compute_drift(rows, list(rows), limit=10)
+        assert out == {"risers": [], "fallers": [], "new_since": []}
+
+    def test_empty_baseline_everything_is_new(self):
+        current = _rows(("a", 9.0), ("b", 5.0))
+        out = compute_drift(current, [], limit=10)
+        assert [r["node"] for r in out["new_since"]] == ["a", "b"]
+        assert out["risers"] == [] and out["fallers"] == []
+
+    def test_new_since_respects_limit_and_rank_order(self):
+        current = _rows(("a", 9.0), ("b", 5.0), ("c", 1.0))
+        out = compute_drift(current, [], limit=2)
+        assert [r["node"] for r in out["new_since"]] == ["a", "b"]

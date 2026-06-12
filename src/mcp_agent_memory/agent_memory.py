@@ -30,6 +30,124 @@ def _clean_edge_props(raw: Any) -> dict[str, Any]:
     }
 
 
+# -- Orient panel math (pure, DB-free, unit-tested) ----------------------------
+# The composite readings of the v0.4.0 instrument panel. Each takes streamed
+# GDS rows ({node, type, score}-shaped dicts) and returns the derived reading.
+# Kept pure so the panel's judgment-bearing arithmetic is testable without a
+# driver — the cypher fetches rows; these decide what the rows mean.
+
+def _rank_positions(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """1-based rank by stream order (rows arrive score-descending)."""
+    return {r["node"]: i + 1 for i, r in enumerate(rows)}
+
+
+def compute_divergence(
+    mass: list[dict[str, Any]],
+    frontier_mass: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """The manifest-destiny detector: the same graph ranked from two reference
+    frames — accumulated mass (ArticleRank) vs. seen-from-the-frontier
+    (personalized PageRank). divergence = normalized frontier position minus
+    normalized mass position; large positive = high mass the frontier doesn't
+    care about (big because it is big — gravity-well suspect), large negative =
+    low mass the frontier leans on (underweighted by accumulation)."""
+    mass_pos = _rank_positions(mass)
+    frontier_pos = _rank_positions(frontier_mass)
+    types = {r["node"]: r.get("type") for r in mass + frontier_mass}
+    common = set(mass_pos) & set(frontier_pos)
+    if len(common) < 2:
+        return {"well_suspects": [], "frontier_lifted": []}
+    m_span = max(len(mass) - 1, 1)
+    f_span = max(len(frontier_mass) - 1, 1)
+    rows = [
+        {
+            "node": name,
+            "type": types.get(name),
+            "mass_rank": mass_pos[name],
+            "frontier_rank": frontier_pos[name],
+            "divergence": round(
+                (frontier_pos[name] - 1) / f_span - (mass_pos[name] - 1) / m_span, 4
+            ),
+        }
+        for name in common
+    ]
+    rows.sort(key=lambda r: r["divergence"], reverse=True)
+    return {
+        "well_suspects": [r for r in rows if r["divergence"] > 0][:limit],
+        "frontier_lifted": [r for r in reversed(rows) if r["divergence"] < 0][:limit],
+    }
+
+
+def compute_weave_audit(
+    degree_rows: list[dict[str, Any]],
+    coefficient_rows: list[dict[str, Any]],
+    limit: int,
+    min_degree: int = 3,
+) -> list[dict[str, Any]]:
+    """The weave-quality audit: local clustering coefficient read against
+    degree. High degree + low coefficient = a star, not a weave — a node
+    everything points at whose neighbors never interconnect, exactly the shape
+    the gravity well inflates undeservedly. star_score = degree * (1 - c)."""
+    coeff = {r["node"]: r.get("coefficient") for r in coefficient_rows}
+    out: list[dict[str, Any]] = []
+    for r in degree_rows:
+        degree = float(r["score"])
+        if degree < min_degree:
+            continue
+        c = float(coeff.get(r["node"]) or 0.0)
+        out.append(
+            {
+                "node": r["node"],
+                "type": r.get("type"),
+                "degree": int(degree),
+                "clustering": round(c, 4),
+                "star_score": round(degree * (1.0 - c), 4),
+            }
+        )
+    out.sort(key=lambda x: x["star_score"], reverse=True)
+    return out[:limit]
+
+
+def compute_drift(
+    current: list[dict[str, Any]],
+    baseline: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Drift over snapshot: the mass reading compared against the same reading
+    as of the previous waking. A well visible AS a well, with velocity, is far
+    less of a prophecy. shift = baseline_rank - current_rank (positive = rose).
+    new_since = in the current reading with no baseline presence at all."""
+    cur_pos = _rank_positions(current)
+    base_pos = _rank_positions(baseline)
+    types = {r["node"]: r.get("type") for r in current}
+    movers = [
+        {
+            "node": name,
+            "type": types.get(name),
+            "baseline_rank": base_pos[name],
+            "current_rank": pos,
+            "shift": base_pos[name] - pos,
+        }
+        for name, pos in cur_pos.items()
+        if name in base_pos
+    ]
+    risers = sorted(
+        (m for m in movers if m["shift"] > 0),
+        key=lambda m: m["shift"], reverse=True,
+    )[:limit]
+    fallers = sorted(
+        (m for m in movers if m["shift"] < 0),
+        key=lambda m: m["shift"],
+    )[:limit]
+    new_since = [
+        {"node": name, "type": types.get(name), "current_rank": pos}
+        for name, pos in sorted(cur_pos.items(), key=lambda kv: kv[1])
+        if name not in base_pos
+    ][:limit]
+    return {"risers": risers, "fallers": fallers, "new_since": new_since}
+
+
 # -- Node Type Enum -----------------------------------------------------------
 
 class NodeType(str, Enum):
@@ -798,9 +916,11 @@ class Neo4jAgentMemory:
             "unsealed": unsealed,
         }
 
-    # Reserved name for the orient projection. A single fixed name (not a
-    # per-call one) lets a crashed prior orient be cleaned up defensively.
+    # Reserved names for the orient projections. Fixed names (not per-call
+    # ones) let a crashed prior orient be cleaned up defensively. The _asof
+    # projection is the previous-waking baseline used by the drift reading.
     _ORIENT_PROJECTION = "__agent_memory_orient__"
+    _ORIENT_ASOF_PROJECTION = "__agent_memory_orient_asof__"
 
     async def _frontier(self, limit: int = 20) -> dict[str, Any]:
         """The epistemic frontier: where the topology is thinnest, derived from
@@ -895,27 +1015,34 @@ class Neo4jAgentMemory:
         """The Exist read: one structural self-portrait over the coherence
         subgraph, run once per waking — not per Encounter.
 
-        Bundles the whole GDS spread — projection lifecycle + PageRank,
-        Betweenness, Louvain, WCC — into a single call. The agent never
-        manages a projection by hand: cleanup is a finally, not a discipline,
-        and a crashed prior run is dropped defensively before this one starts.
-        The projection is coherence-only by construction — authored edges
+        The panel is constitution, not analytics: its payload is causal input
+        to the next encounter's writes, so each instrument is chosen against
+        the gravity well (mass attracts authorship attracts mass). The
+        projection lifecycle is self-managed — cleanup is a finally, not a
+        discipline, and a crashed prior run is dropped defensively. The
+        projection is coherence-only by construction — authored edges
         (RelationType minus PROCESS_EDGES) over the non-process nodes (every
         type but Encounter), undirected — so the spine/provenance edges that
         turn Encounters into artificial centrality hubs can never enter the
         read. Surfaces — never authors; writes no node, no edge.
 
-        PageRank = what you have come to treat as central. Betweenness = what
-        bridges your lines of inquiry. Louvain = your chapters. WCC = what you
-        noticed and never connected. Alongside the spread it returns the
-        epistemic FRONTIER — where your topology is thinnest and one more
-        Observation would move the needle most (unanswered Questions, untested
-        Hypotheses, ungrounded Concepts, confidence/evidence dissonance, contested
-        Hypotheses). Centrality says what you are; the frontier says where to look
-        next. Within the Exist, reach for the single gds_* tools when a specific
+        The readings: MASS (ArticleRank — damped accumulation, a weaker well
+        than PageRank). FRONTIER_MASS (personalized PageRank seeded from the
+        frontier — the same graph seen from the unresolved). DIVERGENCE (the
+        manifest-destiny detector: high in mass, low from the frontier = big
+        because it is big). BETWEENNESS (what bridges your inquiries). LEIDEN
+        (your chapters — guaranteed well-connected; an identity instrument
+        must not hallucinate communities). WCC (what you never connected).
+        FRAGILITY (articulation points + bridges — importance as load-bearing
+        responsibility, not accumulation). WEAVE_AUDIT (clustering coefficient
+        vs degree — stars vs weaves). DRIFT (mass vs the previous waking:
+        risers, fallers, new — the well visible AS a well, with velocity).
+        Plus the epistemic FRONTIER (the directive half) and the UNSEALED set.
+        Within the Exist, reach for the single gds_* tools when a specific
         question arises; this is the opening survey.
         """
         proj = self._ORIENT_PROJECTION
+        asof = self._ORIENT_ASOF_PROJECTION
         coherence_rels = [r.value for r in RelationType if r.value not in PROCESS_EDGES]
         semantic_nodes = [nt.value for nt in NodeType if nt.value not in PROCESS_TYPES]
 
@@ -928,33 +1055,79 @@ class Neo4jAgentMemory:
             "RETURN gds.graph.project($proj, source, target, {}, "
             "{undirectedRelationshipTypes: ['*']}) AS g"
         )
+        # The previous-waking baseline: the same coherence subgraph restricted
+        # to what existed when the latest locus woke (nodes AND edges — an edge
+        # authored later between old nodes is still new structure).
+        asof_project_query = lit(
+            f"MATCH (source)-[r:{rel_filter}]->(target) "
+            f"WHERE ({source_labels}) AND ({target_labels}) "
+            "AND source.t_created < $boundary AND target.t_created < $boundary "
+            "AND r.t_created < $boundary "
+            "RETURN gds.graph.project($proj, source, target, {}, "
+            "{undirectedRelationshipTypes: ['*']}) AS g"
+        )
 
         drop_query = (
             "CALL gds.graph.drop($proj, false) YIELD graphName RETURN graphName"
         )
-        algos = {
-            "pagerank": "CALL gds.pageRank.stream($proj) YIELD nodeId, score "
+        node_return = (
             "RETURN gds.util.asNode(nodeId).name AS node, "
-            "labels(gds.util.asNode(nodeId))[0] AS type, score "
-            "ORDER BY score DESC LIMIT $lim",
-            "betweenness": "CALL gds.betweenness.stream($proj) YIELD nodeId, score "
-            "RETURN gds.util.asNode(nodeId).name AS node, "
-            "labels(gds.util.asNode(nodeId))[0] AS type, score "
-            "ORDER BY score DESC LIMIT $lim",
-            "louvain": "CALL gds.louvain.stream($proj) YIELD nodeId, communityId "
-            "RETURN gds.util.asNode(nodeId).name AS node, "
-            "labels(gds.util.asNode(nodeId))[0] AS type, communityId "
-            "ORDER BY communityId, node LIMIT $lim",
-            "wcc": "CALL gds.wcc.stream($proj) YIELD nodeId, componentId "
-            "RETURN gds.util.asNode(nodeId).name AS node, "
-            "labels(gds.util.asNode(nodeId))[0] AS type, componentId "
-            "ORDER BY componentId, node LIMIT $lim",
-        }
-
-        # Defensive: clear any projection a crashed prior orient left behind.
-        await self.driver.execute_query(
-            drop_query, {"proj": proj}, routing_=RoutingControl.WRITE
+            "labels(gds.util.asNode(nodeId))[0] AS type"
         )
+        # Full streams (python-limited): the composite readings need every
+        # node's rank, not the display cut.
+        mass_query = (
+            f"CALL gds.articleRank.stream($proj) YIELD nodeId, score "
+            f"{node_return}, score ORDER BY score DESC"
+        )
+        seeded_query = (
+            "MATCH (s) WHERE s.name IN $seed_names "
+            "WITH collect(s) AS seeds "
+            "CALL gds.pageRank.stream($proj, {sourceNodes: seeds}) "
+            f"YIELD nodeId, score {node_return}, score ORDER BY score DESC"
+        )
+        degree_query = (
+            f"CALL gds.degree.stream($proj) YIELD nodeId, score "
+            f"{node_return}, score ORDER BY score DESC"
+        )
+        coefficient_query = (
+            "CALL gds.localClusteringCoefficient.stream($proj) "
+            "YIELD nodeId, localClusteringCoefficient "
+            f"{node_return}, localClusteringCoefficient AS coefficient"
+        )
+        # Display-limited streams.
+        algos = {
+            "betweenness": "CALL gds.betweenness.stream($proj) YIELD nodeId, score "
+            f"{node_return}, score ORDER BY score DESC LIMIT $lim",
+            "leiden": "CALL gds.leiden.stream($proj) YIELD nodeId, communityId "
+            f"{node_return}, communityId ORDER BY communityId, node LIMIT $lim",
+            "wcc": "CALL gds.wcc.stream($proj) YIELD nodeId, componentId "
+            f"{node_return}, componentId ORDER BY componentId, node LIMIT $lim",
+        }
+        articulation_query = (
+            f"CALL gds.articulationPoints.stream($proj) YIELD nodeId "
+            f"{node_return} ORDER BY node LIMIT $lim"
+        )
+        bridges_query = (
+            "CALL gds.bridges.stream($proj) YIELD from, to "
+            "RETURN gds.util.asNode(from).name AS from_node, "
+            "gds.util.asNode(to).name AS to_node "
+            "ORDER BY from_node, to_node LIMIT $lim"
+        )
+
+        async def _stream(
+            query: LiteralString, projection: str = proj, **params: Any
+        ) -> list[dict[str, Any]]:
+            res = await self.driver.execute_query(
+                query, {"proj": projection, **params}, routing_=RoutingControl.READ
+            )
+            return [dict(r) for r in res.records]
+
+        # Defensive: clear any projections a crashed prior orient left behind.
+        for name in (proj, asof):
+            await self.driver.execute_query(
+                drop_query, {"proj": name}, routing_=RoutingControl.WRITE
+            )
         try:
             proj_result = await self.driver.execute_query(
                 project_query, {"proj": proj}, routing_=RoutingControl.READ
@@ -969,17 +1142,138 @@ class Neo4jAgentMemory:
                     else None,
                 }
             }
-            for key, q in algos.items():
+
+            # The frontier first: it is both a reading (the directive half)
+            # and the seed authority for the frontier-relative mass reading.
+            frontier = await self._frontier(limit=result_limit)
+            out["frontier"] = frontier
+
+            # MASS — ArticleRank, full stream.
+            mass_full = await _stream(lit(mass_query))
+            out["mass"] = mass_full[:result_limit]
+
+            # FRONTIER_MASS — personalized PageRank seeded from the frontier.
+            # Primary seeds: open Questions + untested Hypotheses (the named
+            # unresolved). Fallback when those are empty: every frontier cut.
+            # Seeds must exist in the projection (i.e. carry >=1 coherence
+            # edge), so eligibility is checked before seeding; an isolated
+            # Question is real frontier but invisible to a graph algorithm.
+            primary = [r["name"] for r in frontier["unanswered_questions"]] + [
+                r["name"] for r in frontier["untested_hypotheses"]
+            ]
+            fallback = primary + [
+                r["name"]
+                for cut in (
+                    "ungrounded_concepts",
+                    "confidence_dissonance",
+                    "contested_hypotheses",
+                )
+                for r in frontier[cut]
+            ]
+            eligible_query = lit(
+                f"MATCH (s)-[:{rel_filter}]-() WHERE s.name IN $names "
+                "RETURN collect(DISTINCT s.name) AS eligible"
+            )
+
+            async def _eligible(names: list[str]) -> list[str]:
+                if not names:
+                    return []
                 res = await self.driver.execute_query(
-                    lit(q),
-                    {"proj": proj, "lim": result_limit},
+                    eligible_query,
+                    {"names": list(dict.fromkeys(names))},
                     routing_=RoutingControl.READ,
                 )
-                out[key] = [dict(r) for r in res.records]
-            # The frontier rides along with the survey: derived from existing
-            # structure, not the GDS projection, so it needs no projection of its
-            # own. Where you are central, and where you are thin, in one read.
-            out["frontier"] = await self._frontier(limit=result_limit)
+                return res.records[0]["eligible"] if res.records else []
+
+            seeds = await _eligible(primary)
+            seed_mode = "frontier"
+            if not seeds:
+                seeds = await _eligible(fallback)
+                seed_mode = "full_frontier_fallback"
+            if seeds:
+                seeded_full = await _stream(lit(seeded_query), seed_names=seeds)
+                out["frontier_mass"] = {
+                    "seed_mode": seed_mode,
+                    "seeds": seeds,
+                    "results": seeded_full[:result_limit],
+                }
+                # DIVERGENCE — the manifest-destiny detector, only meaningful
+                # when both reference frames produced a reading.
+                out["divergence"] = compute_divergence(
+                    mass_full, seeded_full, result_limit
+                )
+            else:
+                out["frontier_mass"] = {
+                    "seed_mode": "none",
+                    "seeds": [],
+                    "results": [],
+                }
+                out["divergence"] = None
+
+            # BETWEENNESS / LEIDEN / WCC — display-limited.
+            for key, q in algos.items():
+                out[key] = await _stream(lit(q), lim=result_limit)
+
+            # FRAGILITY — articulation points + bridges.
+            out["fragility"] = {
+                "articulation_points": await _stream(
+                    lit(articulation_query), lim=result_limit
+                ),
+                "bridges": await _stream(lit(bridges_query), lim=result_limit),
+            }
+
+            # WEAVE_AUDIT — clustering coefficient against degree.
+            degree_full = await _stream(lit(degree_query))
+            coefficient_full = await _stream(lit(coefficient_query))
+            out["weave_audit"] = compute_weave_audit(
+                degree_full, coefficient_full, result_limit
+            )
+
+            # DRIFT — mass vs the previous waking. The boundary is the latest
+            # locus genesis (orient runs before this locus advances, so the
+            # latest root is a prior waking's). Read-time, no writes.
+            boundary_res = await self.driver.execute_query(
+                "MATCH (e:Encounter) WHERE NOT ()-[:NEXT_ENCOUNTER]->(e) "
+                "RETURN max(e.t_exist) AS boundary",
+                routing_=RoutingControl.READ,
+            )
+            boundary = (
+                boundary_res.records[0]["boundary"] if boundary_res.records else None
+            )
+            if boundary is None:
+                out["drift"] = None
+            else:
+                try:
+                    asof_result = await self.driver.execute_query(
+                        asof_project_query,
+                        {"proj": asof, "boundary": boundary},
+                        routing_=RoutingControl.READ,
+                    )
+                    ag = asof_result.records[0]["g"] if asof_result.records else {}
+                    baseline_nodes = (
+                        ag.get("nodeCount") if isinstance(ag, dict) else None
+                    )
+                    if not baseline_nodes:
+                        out["drift"] = {
+                            "as_of": _neo4j_datetime_to_str(boundary),
+                            "note": "no coherence structure existed at the previous waking",
+                        }
+                    else:
+                        baseline_full = await _stream(
+                            lit(mass_query), projection=asof
+                        )
+                        out["drift"] = {
+                            "as_of": _neo4j_datetime_to_str(boundary),
+                            "baseline_node_count": baseline_nodes,
+                            **compute_drift(mass_full, baseline_full, result_limit),
+                        }
+                except Exception as exc:  # the panel survives a failed baseline
+                    logger.warning(f"orient drift baseline failed: {exc}")
+                    out["drift"] = {
+                        "as_of": _neo4j_datetime_to_str(boundary),
+                        "note": f"baseline unavailable: {exc}",
+                    }
+
             # The unsealed set rides along too: orient runs before the first
             # advance, so the waking sees every unsealed encounter — live
             # sibling or orphan, not mechanically distinguishable — annotated
@@ -987,9 +1281,10 @@ class Neo4jAgentMemory:
             out["unsealed"] = await self._unsealed(limit=result_limit)
             return out
         finally:
-            await self.driver.execute_query(
-                drop_query, {"proj": proj}, routing_=RoutingControl.WRITE
-            )
+            for name in (proj, asof):
+                await self.driver.execute_query(
+                    drop_query, {"proj": name}, routing_=RoutingControl.WRITE
+                )
 
     async def close_encounter(
         self,

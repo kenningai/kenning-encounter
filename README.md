@@ -57,12 +57,21 @@ re-deriving it every session.
   subtree back to the observations and citations under it), `read_cypher`
   (EXPLAIN-gated, read-only), `get_schema`, `list_node_types`,
   `list_relation_types`, `list_vocabulary`.
-- **Analytics:** `orient` — a one-call spread (PageRank / Betweenness / Louvain /
-  WCC) over the authored-edge graph, managing the projection for you, plus a
-  **frontier** view of where the graph is thinnest (unanswered questions, untested
-  hypotheses, ungrounded concepts). For focused questions: `gds_create_projection`
-  → `gds_pagerank` / `gds_betweenness` / `gds_louvain` / `gds_wcc` →
-  `gds_drop_projection`.
+- **Analytics:** `orient` — a one-call instrument panel over the authored-edge
+  graph, managing the projections for you. An agent whose memory analytics feed
+  its next writes can develop rich-get-richer bias (what the reading makes
+  prominent gets written about more), so the panel is composed against that
+  feedback loop: **mass** (ArticleRank — damped accumulation), **frontier_mass**
+  (PageRank personalized from the open questions/untested hypotheses — the same
+  graph ranked from what's unresolved), their **divergence** (nodes prominent
+  only by accumulation vs. nodes the open work actually leans on),
+  **betweenness**, **leiden** communities, **wcc**, a **fragility** map
+  (articulation points + bridges), a **weave_audit** (high-degree/low-clustering
+  stars), and **drift** (the mass reading vs. the previous session's baseline —
+  risers, fallers, new). Plus the **frontier** view of where the graph is
+  thinnest (unanswered questions, untested hypotheses, ungrounded concepts).
+  For focused questions: `gds_create_projection` → `gds_pagerank` /
+  `gds_betweenness` / `gds_leiden` / `gds_wcc` → `gds_drop_projection`.
 
 The operations manual is served as the MCP resource `agent-memory://howto` and
 also ships at `src/mcp_agent_memory/HOWTO.xml` — read it before recording.

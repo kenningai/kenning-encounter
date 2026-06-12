@@ -15,9 +15,9 @@
   Get the discipline wrong and the memory collapses into one of two useless
   things: a MIRROR of a source you read (you transcribed it instead of learning
   it), or a FLAT JOURNAL (a pile of notes the analytics can't traverse). Get it
-  right and the graph becomes navigable: PageRank shows what you've come to treat
-  as central, Louvain shows how your attention clusters, the encounter chain
-  shows how your understanding evolved.
+  right and the graph becomes navigable: the mass reading shows what you've come
+  to treat as central, Leiden shows how your attention clusters, the encounter
+  chain shows how your understanding evolved.
 
   Read this before your first tool call.
 -->
@@ -60,18 +60,32 @@
   </principle>
 
   <principle name="use-the-analytics-to-see-the-shape">
-    GDS shows you the shape of your own memory across time: PageRank (what you've
-    come to treat as central), Betweenness (what bridges your lines of inquiry),
-    Louvain (how your attention clusters), WCC (what you noticed and never
-    connected). When you re-enter after time away, call orient — it runs all four
-    over your memory in one step and cleans up the projection for you. orient also
+    GDS shows you the shape of your own memory across time — and because the
+    orient reading feeds your next writes, a naive centrality instrument is a
+    feedback loop: what it makes prominent gets written about more, which makes
+    it more prominent. The orient panel is composed against that bias. MASS
+    (ArticleRank — what you've come to treat as central, with hub transmission
+    damped). FRONTIER_MASS (PageRank personalized from your open Questions and
+    untested Hypotheses — the same graph ranked from what's unresolved; falls
+    back to the full frontier when those are empty, and reports seed_mode).
+    DIVERGENCE (well_suspects are prominent only by accumulation; frontier_lifted
+    are low-mass nodes your open work leans on). BETWEENNESS (what bridges your
+    lines of inquiry). LEIDEN (how your attention clusters — guaranteed
+    well-connected communities). WCC (what you noticed and never connected).
+    FRAGILITY (articulation points and bridges — what disconnects your memory if
+    removed). WEAVE_AUDIT (high-degree, low-clustering nodes are stars, not
+    weaves — heavily referenced but never interconnected). DRIFT (the mass
+    reading against the previous session's baseline — risers, fallers,
+    new_since). When you re-enter after time away, call orient — it runs the
+    whole panel in one step and cleans up its projections for you. orient also
     returns the FRONTIER — where your memory is thinnest: unanswered Questions,
     untested Hypotheses, ungrounded Concepts, confidence that outruns its evidence.
     It also returns the UNSEALED set — encounters no one sealed, with last
     activity and any dissolved_at mark; awareness, not a work queue.
-    The analytics say what you've made central; the frontier says where to look
-    next. Reach for the single gds_* tools for focused questions once you're
-    oriented. The tools surface; you decide what it means.
+    The mass readings say what you've made central; the frontier says where to
+    look next. Reach for the single gds_* tools for focused questions once you're
+    oriented — scoping your own projection is how you formulate the question.
+    The tools surface; you decide what it means.
   </principle>
 </purpose>
 
