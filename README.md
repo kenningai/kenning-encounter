@@ -72,9 +72,57 @@ re-deriving it every session.
   thinnest (unanswered questions, untested hypotheses, ungrounded concepts).
   For focused questions: `gds_create_projection` → `gds_pagerank` /
   `gds_betweenness` / `gds_leiden` / `gds_wcc` → `gds_drop_projection`.
+- **Infusion:** `infuse` — the *unasked* recall channel; see the next section.
 
 The operations manual is served as the MCP resource `agent-memory://howto` and
 also ships at `src/mcp_agent_memory/HOWTO.xml` — read it before recording.
+
+## Governed infusion — memory that arrives on its own
+
+Everything above is *asked-for* recall: the agent calls `orient` or `search`
+and gets an answer. Real working memory has a second mode — what you already
+know about the matter at hand surfaces *without being asked*, at the moment
+it bears. `infuse` is that channel, run once per user prompt (typically from
+a harness hook), and it is **governed**, because the naive form — re-inject
+whatever is heaviest, every turn — is a feedback loop: whatever the payload
+makes salient gets written about, gains weight, and dominates the next
+payload. An agent bound to that loop doesn't get more knowledgeable, it gets
+more repetitive.
+
+The pipeline: **Extract** focal signals from the prompt (terms, identifiers,
+CIDRs, hostnames) → **Match** candidates via the fulltext index → **Rank**
+with a single biased personalized rank over an *ephemeral, coherence-only
+projection* — focal seeds at full weight, the open frontier (unanswered
+questions, live hypotheses) at a minority bias so unresolved work keeps a
+voice — checked against unbiased mass so genuine tension leads → **Format**
+a signed, budgeted payload: load-bearing conflicts first at full amplitude,
+peripheral ones parked in a brief register, neighborhood after. The payload
+is signed with the seed terms it awoke from, so the agent can see *why* this
+surfaced and keep its own judgment over it.
+
+Three disciplines keep the channel honest:
+
+- **The renewal economy.** A per-session delivery ledger: a node's full body
+  is delivered at first sight, on a changed fact-state, or after a staleness
+  horizon — otherwise it re-pins as a one-line *handle* in a STANDING
+  register ("you were already told this; the body is earlier in your
+  context"). Payloads rotate with the work instead of droning a permanent
+  core. The ledger is stamped from what was actually *delivered*, never
+  merely selected, and the metadata reports both.
+- **Silence is a valid answer.** `mode=delta` (per tool call) returns
+  recognition or conflict only — and when the moment holds nothing the graph
+  recognizes and contests nothing it holds, it returns nothing. Each
+  fact-state announces once, at first sight, then suppresses; a changed
+  state re-announces.
+- **Graph-native reach.** Focal seeds expand one hop across authored
+  coherence edges from matched Concepts, at reduced bias — the concept that
+  *matches* often sits one edge from the one that *matters*. No embeddings,
+  no vector index, nothing vector-shaped ever stored.
+
+`scripts/agent_memory_infuse_hook.py` is a stdlib-only, fail-silent hook
+client for Claude Code-style harnesses: full mode on each user prompt, delta
+mode per tool call. If the server is down, the hook stays silent — the agent
+just runs uninfused.
 
 ## Quick start
 
@@ -101,6 +149,14 @@ allows one user database, so the stack names it via `initial.dbms.default_databa
 CLI args → env vars → defaults: `NEO4J_URL`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`,
 `NEO4J_DATABASE`, `NEO4J_TRANSPORT` (`stdio` | `streamable-http` | `sse`),
 `NEO4J_MCP_SERVER_*`, `NEO4J_NAMESPACE`, `NEO4J_READ_TIMEOUT`.
+
+Infusion governors: `NEO4J_INFUSE_FRONTIER_BIAS` (default `0.3` — the
+frontier's minority weight in the biased rank), `NEO4J_INFUSE_REFRESH_TURNS`
+(default `10` — the staleness horizon before a standing node's full body is
+re-delivered), and per-call `expansion_bias` (`0` disables cluster
+expansion). Per node, `frontier_mute: true` (on `Question` / `Hypothesis` /
+`Concept`) retires a resolved line of inquiry from every frontier surface —
+orient and infusion both — while leaving it fully queryable.
 
 HTTP sessions are always **stateful** — there is no stateless option, by
 design: an encounter depends on the state that preceded it (per-session

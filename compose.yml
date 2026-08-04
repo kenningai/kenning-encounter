@@ -67,7 +67,7 @@ services:
 
   agent_memory:
     build: .
-    image: mcp-agent-memory:0.5.0
+    image: mcp-agent-memory:0.5.1
     container_name: agent_memory-mcp
     depends_on:
       neo4j:

@@ -87,6 +87,49 @@
     oriented — scoping your own projection is how you formulate the question.
     The tools surface; you decide what it means.
   </principle>
+
+  <principle name="infusion-is-recall-you-did-not-ask-for">
+    Everything else here is asked-for recall. The infuse channel is the other
+    mode: at each prompt (wired through a harness hook) it surfaces what you
+    already hold about the matter at hand, without being asked. Read its
+    payload with these disciplines:
+
+    The payload is SIGNED — a header names the seed terms it awoke from. Read
+    the signature and keep your own position: the payload PROPOSES relevance;
+    you decide what it means. Tension leads by design — a conflict
+    load-bearing for what you are examining arrives first at full amplitude
+    and warrants stopping; a peripheral one arrives in the parked-tensions
+    register at the end — noted, unresolved, non-blocking. Carry it through
+    the work and resolve it in cleanup; never let it seize a frame it does
+    not own, and never drop it.
+
+    A one-line HANDLE in the STANDING register means: you were already told
+    this, this session — the full body is earlier in your context and the
+    name is your bridge back to it. Do not treat a handle as new information;
+    do not treat its brevity as diminished standing. What stands, stands.
+
+    Silence is a valid answer. In delta mode the channel returns recognition
+    or conflict, or nothing — an empty response means this moment holds
+    nothing your memory recognizes and contests nothing it holds. Each
+    fact-state announces once, at first sight; a changed state re-announces.
+
+    Two disciplines the payload cannot enforce: (1) when a standing concept
+    governs a move, NAME IT IN THE MOVE — the invocation is the check
+    performing itself, and a concept you can no longer honestly invoke is one
+    you have stopped holding. Fluency in a concept's vocabulary is not
+    performance of its constraint. (2) The displayed frontier is NOT your
+    wondering — the open-threads section shows questions already held;
+    reading it is not asking. If the work surfaces something unresolved,
+    AUTHOR the Question: a wondering never written does not exist
+    structurally.
+
+    Bookkeeping that should not ride your prompts — process meta-notes,
+    experiment records — belongs in Notes, or carries frontier_mute: true
+    (Question/Hypothesis/Concept accept it): muted nodes stay fully
+    queryable but never seed the frontier, in orient or in infusion. The
+    infuse channel surfaces; it never authors — the write pathway stays
+    separate, authored, and yours.
+  </principle>
 </purpose>
 
 <encounter-cycle>
@@ -200,6 +243,7 @@
   <error name="orphan-notes">Notes that never crystallize. Fix: each session, crystallize or retire your drafts; run WCC to find the ones you left behind.</error>
   <error name="forgetting-to-open-or-close">Recording without advance_encounter (refused — "no open Encounter" means YOUR session's), or finishing without close_encounter (the Encounter dangles in the unsealed set). Fix: open every run, close every Encounter — open fresh, write, seal, no dangling.</error>
   <error name="sealing-someone-elses-session">The unsealed set shows another session's open encounter and you tidy it — record into it, or seal it with a summary you compose. Fix: don't. Only the session that lived an encounter can summarize it honestly; an unsealed encounter from a crashed run stays unsealed, and that missing summary is accurate. The dissolved_at timestamp is the only mark the system leaves.</error>
+  <error name="treating-the-infused-frontier-as-your-wondering">Infused payloads show your open threads every prompt, and you never author a new Question because the display feels like asking. Fix: the displayed frontier is recall of questions already held; when examination surfaces something genuinely unresolved, write the Question node. The session that is shown five questions per prompt and records none is the cautionary case.</error>
 </common-errors>
 
 </howto>
