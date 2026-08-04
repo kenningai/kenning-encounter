@@ -187,6 +187,23 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
         or 30
     )
 
+    # Infusion governor: the frontier seed bias in the governed blend
+    # (focal @1.0 + frontier @bias). A tunable whose correct value is an
+    # empirical question — pre-registered as such; 0.3 is the design default.
+    bias = args.infuse_frontier_bias
+    if bias is None:
+        bias = _env_float("NEO4J_INFUSE_FRONTIER_BIAS")
+    config["infuse_frontier_bias"] = 0.3 if bias is None else max(0.0, min(1.0, bias))
+
+    # Infusion governor: the renewal refresh horizon — turns before a
+    # standing body re-delivers (redundancy re-injection against
+    # standing-picture attenuation). Hand-set 10 until EXPERIMENT-BARLOW
+    # B1 places it from the measured attenuation curve.
+    rt = args.infuse_refresh_turns
+    if rt is None:
+        rt = _env_int("NEO4J_INFUSE_REFRESH_TURNS")
+    config["infuse_refresh_turns"] = 10 if rt is None else max(1, min(100, rt))
+
     # No stateless-HTTP option, by design (v0.3.0). Encounters within a session
     # are stateful by definition — they depend on the states that preceded them
     # (per-locus chaining, locus-scoped write targeting) — so HTTP sessions are
@@ -204,6 +221,11 @@ def _default(key: str, value: str) -> str:
 def _env_int(var: str) -> int | None:
     val = os.getenv(var)
     return int(val) if val is not None else None
+
+
+def _env_float(var: str) -> float | None:
+    val = os.getenv(var)
+    return float(val) if val is not None else None
 
 
 def _parse_csv(

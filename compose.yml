@@ -67,7 +67,7 @@ services:
 
   agent_memory:
     build: .
-    image: mcp-agent-memory:0.4.0
+    image: mcp-agent-memory:0.5.0
     container_name: agent_memory-mcp
     depends_on:
       neo4j:
@@ -84,6 +84,15 @@ services:
       NEO4J_MCP_SERVER_PORT: "8000"
       NEO4J_MCP_SERVER_PATH: "/api/mcp/"
       NEO4J_MCP_SERVER_ALLOWED_HOSTS: "*"
+      # Infusion governors — PINNED EXPLICITLY, not left to code defaults.
+      # Both values are pre-registered experimental variables cited in the
+      # published protocol, so the running value must be attestable from the
+      # deployment file rather than inferred from source. These match the
+      # go-forward decision of 2026-07-29 (frontier bias unchanged at 0.3).
+      NEO4J_INFUSE_FRONTIER_BIAS: "0.3"
+      # Hand-set until EXPERIMENT-BARLOW B1 places it at the measured knee of
+      # the attenuation curve. Do not tune by feel — that is the whole point.
+      NEO4J_INFUSE_REFRESH_TURNS: "10"
       # HTTP sessions are always stateful (v0.3.0) — no knob. The session IS
       # the locus: encounters depend on the states that preceded them, so the
       # mcp-session-id carries the locus identity and close_encounter /

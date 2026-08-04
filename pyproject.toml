@@ -1,6 +1,6 @@
 [project]
 name = "mcp-agent-memory"
-version = "0.4.0"
+version = "0.5.0"
 description = "Structured, persistent working memory for LLM agents over Neo4j — accumulate, recall, and reason across sessions, with tool-enforced integrity"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -39,7 +39,6 @@ dev = [
     "pytest>=8.3.5",
     "pytest-asyncio>=0.25.3",
     "testcontainers[neo4j]>=4.10.0",
-    "aiohttp>=3.8.0",
 ]
 
 [project.scripts]

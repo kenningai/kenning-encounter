@@ -1,9 +1,22 @@
 import logging
+import time
+import uuid
 from enum import Enum
 from typing import Any, LiteralString
 
 from neo4j import AsyncDriver, RoutingControl
 
+from .infuse import (
+    commit_delivery,
+    delta_novelty,
+    extract_focal_signals,
+    format_delta,
+    format_payload,
+    lucene_query,
+    renewal_filter_edges,
+    renewal_partition,
+    triage_conflicts,
+)
 from .utils import load_cypher, lit
 
 logger = logging.getLogger("mcp_agent_memory")
@@ -148,6 +161,43 @@ def compute_drift(
     return {"risers": risers, "fallers": fallers, "new_since": new_since}
 
 
+def frontier_seed_candidates(
+    frontier: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Seed names for frontier-biased rank reads (orient's frontier_mass and
+    infuse's governed blend). Primary: open Questions + untested Hypotheses —
+    the named unresolved. Fallback (for a waking whose named frontier is
+    empty): every frontier cut. Pure — the eligibility check (a seed must
+    carry a coherence edge to exist in the projection) is a DB read and stays
+    on the class."""
+    primary = [r["name"] for r in frontier["unanswered_questions"]] + [
+        r["name"] for r in frontier["untested_hypotheses"]
+    ]
+    fallback = primary + [
+        r["name"]
+        for cut in (
+            "ungrounded_concepts",
+            "confidence_dissonance",
+            "contested_hypotheses",
+        )
+        for r in frontier[cut]
+    ]
+    return primary, fallback
+
+
+def coherence_projection_parts() -> tuple[str, str, str]:
+    """The structural fragments of the coherence-only projection — authored
+    edges (RelationType minus PROCESS_EDGES) over the non-process nodes —
+    shared by orient and infuse so the two instruments read the same subgraph
+    by construction. Returns (rel_filter, source_labels, target_labels)."""
+    coherence_rels = [r.value for r in RelationType if r.value not in PROCESS_EDGES]
+    semantic_nodes = [nt.value for nt in NodeType if nt.value not in PROCESS_TYPES]
+    rel_filter = "|".join(f"`{rt}`" for rt in coherence_rels)
+    source_labels = " OR ".join(f"source:`{nt}`" for nt in semantic_nodes)
+    target_labels = " OR ".join(f"target:`{nt}`" for nt in semantic_nodes)
+    return rel_filter, source_labels, target_labels
+
+
 # -- Node Type Enum -----------------------------------------------------------
 
 class NodeType(str, Enum):
@@ -284,6 +334,10 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
         "optional": {
             "category": str,
             "status": str,
+            # True = excluded from frontier candidacy (orient display and
+            # infuse seeding alike): declared bookkeeping, not epistemic
+            # frontier. v0.6.0, from the experiment's self-reference loop.
+            "frontier_mute": bool,
         },
         "enums": {
             "status": CONCEPT_STATUS,
@@ -302,6 +356,7 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
             "priority": str,
             "t_raised": str,
             "t_resolved": str,
+            "frontier_mute": bool,
         },
         "enums": {
             "status": QUESTION_STATUS,
@@ -314,6 +369,7 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
             "status": str,
             "t_proposed": str,
             "t_resolved": str,
+            "frontier_mute": bool,
         },
         "enums": {
             "confidence": HYPOTHESIS_CONFIDENCE,
@@ -620,6 +676,20 @@ class Neo4jAgentMemory:
         # encounters (one session holds many work-units); only the write
         # target ends at the seal.
         self._locus_last: dict[str, str] = {}
+        # Per-locus delta novelty: locus key -> content fingerprints of the
+        # recognitions/conflicts already announced to that session. Announce
+        # a fact-state at first sight, suppress the echo; a changed state
+        # re-announces (see infuse.delta_novelty). Session-scoped, evicted
+        # alongside the other locus state.
+        self._delta_seen: dict[str, set[str]] = {}
+        # Per-locus renewal ledger (v0.6.0): locus key -> {node name ->
+        # {"fp", "last_full"}} plus a full-mode turn counter. The delivery
+        # memory behind the renewal economy: full body at first sight /
+        # state change / staleness, one-line handle otherwise (see
+        # infuse.renewal_partition). Session-scoped, evicted alongside the
+        # other locus state.
+        self._delivery_ledger: dict[str, dict[str, dict[str, Any]]] = {}
+        self._locus_turn: dict[str, int] = {}
 
     async def create_fulltext_index(self) -> None:
         """Create the fulltext search index spanning all node types.
@@ -661,6 +731,29 @@ class Neo4jAgentMemory:
             evicted = next(iter(self._locus_last))
             self._locus_last.pop(evicted)
             self._locus_open.pop(evicted, None)
+            self._delta_seen.pop(evicted, None)
+            self._delivery_ledger.pop(evicted, None)
+            self._locus_turn.pop(evicted, None)
+
+    def _delta_seen_for(self, locus_key: str) -> set[str]:
+        """The locus's announced-delta set, creating it (bounded) on first use."""
+        seen = self._delta_seen.get(locus_key)
+        if seen is None:
+            seen = self._delta_seen[locus_key] = set()
+            while len(self._delta_seen) > self._LOCUS_STATE_MAX:
+                self._delta_seen.pop(next(iter(self._delta_seen)))
+        return seen
+
+    def _ledger_for(self, locus_key: str) -> dict[str, dict[str, Any]]:
+        """The locus's renewal ledger, creating it (bounded) on first use."""
+        ledger = self._delivery_ledger.get(locus_key)
+        if ledger is None:
+            ledger = self._delivery_ledger[locus_key] = {}
+            while len(self._delivery_ledger) > self._LOCUS_STATE_MAX:
+                evicted = next(iter(self._delivery_ledger))
+                self._delivery_ledger.pop(evicted)
+                self._locus_turn.pop(evicted, None)
+        return ledger
 
     async def _resolve_encounter(
         self, locus_key: str | None, encounter: str | None
@@ -944,6 +1037,7 @@ class Neo4jAgentMemory:
         """
         unanswered = await self.driver.execute_query(
             "MATCH (q:Question) WHERE (q.status = 'open' OR q.status IS NULL) "
+            "AND coalesce(q.frontier_mute, false) = false "
             "AND NOT (:Observation)-[:RESOLVES]->(q) "
             "RETURN q.name AS name, q.description AS description "
             "ORDER BY q.t_raised DESC LIMIT $limit",
@@ -953,6 +1047,7 @@ class Neo4jAgentMemory:
         untested = await self.driver.execute_query(
             "MATCH (h:Hypothesis) "
             "WHERE (h.status IS NULL OR h.status IN ['proposed', 'challenged']) "
+            "AND coalesce(h.frontier_mute, false) = false "
             "AND NOT (:Observation)-[:SUPPORTS]->(h) "
             "AND NOT (:Observation)-[:CHALLENGES]->(h) "
             "RETURN h.name AS name, h.description AS description, "
@@ -963,7 +1058,8 @@ class Neo4jAgentMemory:
         )
         ungrounded = await self.driver.execute_query(
             "MATCH (c:Concept) "
-            "WHERE NOT (:Observation)-[:GROUNDS]->(c) "
+            "WHERE coalesce(c.frontier_mute, false) = false "
+            "AND NOT (:Observation)-[:GROUNDS]->(c) "
             "AND NOT (:Observation)-[:ABOUT]->(c) "
             "RETURN c.name AS name, c.description AS description, "
             "       c.status AS status "
@@ -974,12 +1070,14 @@ class Neo4jAgentMemory:
         dissonance = await self.driver.execute_query(
             "CALL () { "
             "  MATCH (h:Hypothesis) WHERE h.confidence = 'high' "
+            "  AND coalesce(h.frontier_mute, false) = false "
             "  WITH h, COUNT { (:Observation)-[:SUPPORTS]->(h) } AS sup "
             "  WHERE sup <= 1 "
             "  RETURN h.name AS name, 'Hypothesis' AS type, "
             "         'confidence:high, ' + toString(sup) + ' SUPPORTS' AS signal "
             "  UNION "
             "  MATCH (c:Concept) WHERE c.status = 'stable' "
+            "  AND coalesce(c.frontier_mute, false) = false "
             "  AND NOT (:Observation)-[:GROUNDS]->(c) "
             "  AND NOT (:Observation)-[:ABOUT]->(c) "
             "  RETURN c.name AS name, 'Concept' AS type, "
@@ -991,7 +1089,8 @@ class Neo4jAgentMemory:
         )
         contested = await self.driver.execute_query(
             "MATCH (h:Hypothesis) "
-            "WHERE (:Observation)-[:SUPPORTS]->(h) "
+            "WHERE coalesce(h.frontier_mute, false) = false "
+            "AND (:Observation)-[:SUPPORTS]->(h) "
             "AND (:Observation)-[:CHALLENGES]->(h) "
             "RETURN h.name AS name, h.description AS description, "
             "       h.status AS status "
@@ -1043,12 +1142,7 @@ class Neo4jAgentMemory:
         """
         proj = self._ORIENT_PROJECTION
         asof = self._ORIENT_ASOF_PROJECTION
-        coherence_rels = [r.value for r in RelationType if r.value not in PROCESS_EDGES]
-        semantic_nodes = [nt.value for nt in NodeType if nt.value not in PROCESS_TYPES]
-
-        rel_filter = "|".join(f"`{rt}`" for rt in coherence_rels)
-        source_labels = " OR ".join(f"source:`{nt}`" for nt in semantic_nodes)
-        target_labels = " OR ".join(f"target:`{nt}`" for nt in semantic_nodes)
+        rel_filter, source_labels, target_labels = coherence_projection_parts()
         project_query = lit(
             f"MATCH (source)-[r:{rel_filter}]->(target) "
             f"WHERE ({source_labels}) AND ({target_labels}) "
@@ -1158,37 +1252,11 @@ class Neo4jAgentMemory:
             # Seeds must exist in the projection (i.e. carry >=1 coherence
             # edge), so eligibility is checked before seeding; an isolated
             # Question is real frontier but invisible to a graph algorithm.
-            primary = [r["name"] for r in frontier["unanswered_questions"]] + [
-                r["name"] for r in frontier["untested_hypotheses"]
-            ]
-            fallback = primary + [
-                r["name"]
-                for cut in (
-                    "ungrounded_concepts",
-                    "confidence_dissonance",
-                    "contested_hypotheses",
-                )
-                for r in frontier[cut]
-            ]
-            eligible_query = lit(
-                f"MATCH (s)-[:{rel_filter}]-() WHERE s.name IN $names "
-                "RETURN collect(DISTINCT s.name) AS eligible"
-            )
-
-            async def _eligible(names: list[str]) -> list[str]:
-                if not names:
-                    return []
-                res = await self.driver.execute_query(
-                    eligible_query,
-                    {"names": list(dict.fromkeys(names))},
-                    routing_=RoutingControl.READ,
-                )
-                return res.records[0]["eligible"] if res.records else []
-
-            seeds = await _eligible(primary)
+            primary, fallback = frontier_seed_candidates(frontier)
+            seeds = await self._eligible_seeds(primary, rel_filter)
             seed_mode = "frontier"
             if not seeds:
-                seeds = await _eligible(fallback)
+                seeds = await self._eligible_seeds(fallback, rel_filter)
                 seed_mode = "full_frontier_fallback"
             if seeds:
                 seeded_full = await _stream(lit(seeded_query), seed_names=seeds)
@@ -1285,6 +1353,661 @@ class Neo4jAgentMemory:
                 await self.driver.execute_query(
                     drop_query, {"proj": name}, routing_=RoutingControl.WRITE
                 )
+
+    # -- Infusion (the governed passive synthesis) -----------------------------
+
+    # Seeds admitted from Match, and the ranked-subgraph size the payload is
+    # built from. Small on purpose: the payload is a disposition, not a dump.
+    _INFUSE_SEED_LIMIT = 12
+    _INFUSE_DELTA_MATCH_LIMIT = 8
+    # Concept-cluster expansion (v0.7.0, EXPERIMENT-BARLOW B2): matched-band
+    # reach — nodes one coherence hop from focal-matched Concepts enter the
+    # blend at this bias. Fixed this version, deliberately: one new tunable
+    # at a time (per-call override exists for the benchmark's OFF arm).
+    _INFUSE_EXPANSION_BIAS = 0.5
+
+    async def _eligible_seeds(self, names: list[str], rel_filter: str) -> list[str]:
+        """Filter seed names to those carrying >=1 coherence edge — a seed must
+        exist in the coherence-only projection to bias a rank computation; an
+        isolated node is real but invisible to a graph algorithm."""
+        if not names:
+            return []
+        res = await self.driver.execute_query(
+            lit(
+                f"MATCH (s)-[:{rel_filter}]-() WHERE s.name IN $names "
+                "RETURN collect(DISTINCT s.name) AS eligible"
+            ),
+            {"names": list(dict.fromkeys(names))},
+            routing_=RoutingControl.READ,
+        )
+        return res.records[0]["eligible"] if res.records else []
+
+    async def _match_focal(
+        self, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Match: resolve focal signals to substrate nodes via the fulltext
+        index. Process nodes are excluded — an Encounter is when, not what."""
+        result = await self.driver.execute_query(
+            "CALL db.index.fulltext.queryNodes('agent_memory_index', $query) "
+            "YIELD node, score WHERE NOT node:Encounter "
+            "RETURN node.name AS name, labels(node)[0] AS type, "
+            "       node.description AS description, score "
+            "ORDER BY score DESC LIMIT $limit",
+            {"query": query, "limit": limit},
+            routing_=RoutingControl.READ,
+        )
+        return [dict(r) for r in result.records]
+
+    async def _conflicts_among(self, names: list[str]) -> list[dict[str, Any]]:
+        """Conflict extraction: CHALLENGES edges and confidence/evidence
+        dissonance touching the named subgraph. Divergence flags are computed
+        by the caller (they need both rank frames)."""
+        if not names:
+            return []
+        challenges = await self.driver.execute_query(
+            "MATCH (o:Observation)-[r:CHALLENGES]->(h:Hypothesis) "
+            "WHERE o.name IN $names OR h.name IN $names "
+            "RETURN o.name AS from_name, h.name AS to_name, "
+            "       properties(r) AS props",
+            {"names": names},
+            routing_=RoutingControl.READ,
+        )
+        dissonance = await self.driver.execute_query(
+            "CALL () { "
+            "  MATCH (h:Hypothesis) WHERE h.confidence = 'high' AND h.name IN $names "
+            "  WITH h, COUNT { (:Observation)-[:SUPPORTS]->(h) } AS sup "
+            "  WHERE sup <= 1 "
+            "  RETURN h.name AS name, "
+            "         'confidence:high, ' + toString(sup) + ' SUPPORTS' AS detail "
+            "  UNION "
+            "  MATCH (c:Concept) WHERE c.status = 'stable' AND c.name IN $names "
+            "  AND NOT (:Observation)-[:GROUNDS]->(c) "
+            "  AND NOT (:Observation)-[:ABOUT]->(c) "
+            "  RETURN c.name AS name, "
+            "         'status:stable, no observational grounding' AS detail "
+            "} "
+            "RETURN name, detail",
+            {"names": names},
+            routing_=RoutingControl.READ,
+        )
+        out: list[dict[str, Any]] = [
+            {
+                "kind": "challenge",
+                "from_name": r["from_name"],
+                "to_name": r["to_name"],
+                "props": _clean_edge_props(r["props"]),
+            }
+            for r in challenges.records
+        ]
+        out.extend(
+            {"kind": "dissonance", "from_name": r["name"], "detail": r["detail"]}
+            for r in dissonance.records
+        )
+        return out
+
+    async def _anchors_for(self, names: list[str]) -> list[dict[str, Any]]:
+        """The anchoring Encounters of the named nodes, oldest first — the
+        temporal trajectory: which encounters constituted this understanding,
+        in what order. A fact about the WEIGHT of the knowledge."""
+        if not names:
+            return []
+        result = await self.driver.execute_query(
+            "MATCH (e:Encounter)-[:RECORDED|CONSULTED]->(n) "
+            "WHERE n.name IN $names "
+            "RETURN e.name AS encounter, e.t_exist AS t_exist, n.name AS name "
+            "ORDER BY e.t_exist ASC LIMIT 20",
+            {"names": names},
+            routing_=RoutingControl.READ,
+        )
+        return [
+            {
+                "encounter": r["encounter"],
+                "t_exist": _neo4j_datetime_to_str(r["t_exist"]),
+                "name": r["name"],
+            }
+            for r in result.records
+        ]
+
+    async def infuse(
+        self,
+        text: str,
+        mode: str = "full",
+        frontier_bias: float = 0.3,
+        max_chars: int = 10_000,
+        result_limit: int = 30,
+        locus_key: str | None = None,
+        refresh_turns: int = 10,
+        expansion_bias: float | None = None,
+    ) -> dict[str, Any]:
+        """The governed infusion read: Extract -> Match -> Rank -> Format.
+
+        Mechanized passive synthesis — re-awaken the shape of what the
+        substrate already holds about the arriving present, at every decision
+        point, governed against the gravity well. NOT retrieval: the payload
+        answers "what is the topology of what I already hold about this?",
+        ordered deliberately (conflict first), signed as a proposal from the
+        sediment, silent when the substrate has nothing to say. Surfaces —
+        never authors; writes no node, no edge; reads only.
+
+        mode='full': the complete disposition — one biased rank computation
+        seeded from focal matches (bias 1.0) blended with the standing
+        frontier (bias frontier_bias), divergence-checked against unbiased
+        mass, conflicts triaged core/parked by constitutive proximity (the
+        biased rank score IS proximity), neighborhood, open threads, temporal
+        trajectory. Delivered with every user prompt.
+
+        mode='delta': recognition ("already held: ...") or conflict ("this
+        contradicts what you hold") only — otherwise the empty string, and
+        the hook stays silent. Fired at tool-batch boundaries; no GDS, fast.
+        Attenuation is one failure of the living present; burying the
+        arriving present under sediment after every batch is the other.
+        """
+        if mode not in ("full", "delta"):
+            raise ValueError(f"Unknown infuse mode '{mode}'. Use 'full' or 'delta'.")
+        frontier_bias = max(0.0, min(1.0, frontier_bias))
+        max_chars = max(500, min(10_000, max_chars))
+        timings: dict[str, float] = {}
+        t0 = time.perf_counter()
+
+        signals = extract_focal_signals(text)
+        seed_terms = [s["term"] for s in signals]
+        timings["extract"] = time.perf_counter() - t0
+
+        t1 = time.perf_counter()
+        matches: list[dict[str, Any]] = []
+        if signals:
+            matches = await self._match_focal(
+                lucene_query(signals),
+                self._INFUSE_DELTA_MATCH_LIMIT
+                if mode == "delta"
+                else self._INFUSE_SEED_LIMIT,
+            )
+        timings["match"] = time.perf_counter() - t1
+
+        if mode == "delta":
+            return await self._infuse_delta(
+                seed_terms, matches, max_chars, timings, t0, locus_key
+            )
+        return await self._infuse_full(
+            seed_terms, matches, frontier_bias, max_chars, result_limit,
+            timings, t0, locus_key,
+            refresh_turns=max(1, min(100, refresh_turns)),
+            expansion_bias=(
+                self._INFUSE_EXPANSION_BIAS if expansion_bias is None
+                else max(0.0, min(1.0, expansion_bias))
+            ),
+        )
+
+    async def _infuse_delta(
+        self,
+        seed_terms: list[str],
+        matches: list[dict[str, Any]],
+        max_chars: int,
+        timings: dict[str, float],
+        t0: float,
+        locus_key: str | None = None,
+    ) -> dict[str, Any]:
+        """The tool-batch delta: recognition and conflict against the matched
+        nodes only. Everything matched is focal by construction, so a conflict
+        here is core by definition — but delta computes no rank, so its rows
+        carry NO severity: the contradiction, not a number, is the finding
+        (an amplitude printed here and a different amplitude printed by full
+        mode for the same edge would assert a contradiction of our own).
+
+        Novelty-gated per locus: each recognition/conflict FACT-STATE is
+        announced to a session once, at first sight, then suppressed — the
+        cadence derives from the substrate (first arrival of a fact-state),
+        not the scheduler (batch boundaries), and holds under batch-level
+        (PostToolBatch) or per-call (PostToolUse) harness wiring alike. A
+        changed state is a new first sight and re-announces. Suppression
+        counts are reported; the payload stays honest."""
+        recognitions: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        if matches:
+            top_score = matches[0]["score"]
+            strong = [m for m in matches if m["score"] >= 0.6 * top_score][:5]
+            names = [m["name"] for m in strong]
+            anchors = await self.driver.execute_query(
+                "MATCH (e:Encounter)-[:RECORDED|CONSULTED]->(n) "
+                "WHERE n.name IN $names "
+                "RETURN n.name AS name, collect(e.name) AS encounters",
+                {"names": names},
+                routing_=RoutingControl.READ,
+            )
+            anchored = {r["name"]: r["encounters"] for r in anchors.records}
+            recognitions = [
+                {
+                    "name": m["name"],
+                    "type": m["type"],
+                    # Sorted so the novelty content-fingerprint is stable
+                    # against collect() ordering.
+                    "encounters": sorted(anchored.get(m["name"], [])),
+                }
+                for m in strong
+            ]
+            conflicts = await self._conflicts_among(names)
+
+        suppressed = {"recognitions": 0, "conflicts": 0}
+        if locus_key is not None and (recognitions or conflicts):
+            seen = self._delta_seen_for(locus_key)
+            fresh_r, fresh_c, new_keys = delta_novelty(
+                recognitions, conflicts, seen
+            )
+            suppressed = {
+                "recognitions": len(recognitions) - len(fresh_r),
+                "conflicts": len(conflicts) - len(fresh_c),
+            }
+            recognitions, conflicts = fresh_r, fresh_c
+            seen |= new_keys
+
+        payload = format_delta(recognitions, conflicts, max_chars=max_chars)
+        timings["total"] = time.perf_counter() - t0
+        return {
+            "mode": "delta",
+            "payload": payload,
+            "silence": payload == "",
+            "seed_terms": seed_terms,
+            "recognitions": recognitions,
+            "conflicts": conflicts,
+            "suppressed": suppressed,
+            "timings_ms": {k: round(v * 1000, 1) for k, v in timings.items()},
+        }
+
+    async def _infuse_full(
+        self,
+        seed_terms: list[str],
+        matches: list[dict[str, Any]],
+        frontier_bias: float,
+        max_chars: int,
+        result_limit: int,
+        timings: dict[str, float],
+        t0: float,
+        locus_key: str | None = None,
+        refresh_turns: int = 10,
+        expansion_bias: float = 0.5,
+    ) -> dict[str, Any]:
+        """The full governed payload: one biased rank blending focal and
+        frontier seeds over an ephemeral coherence-only projection, divergence
+        against unbiased mass, triaged conflicts, neighborhood, open threads,
+        trajectory — formatted tension-first and signed.
+
+        Renewal-gated per locus (v0.6.0): neighborhood bodies are delivered
+        in full at first sight, on state change, or when stale; otherwise
+        they re-pin as one-line handles in a STANDING register. The measured
+        v0.5.x cost this repays: 19 payloads at saturation with a permanent
+        verbatim core and trajectory yielding every turn."""
+        rel_filter, source_labels, target_labels = coherence_projection_parts()
+
+        t2 = time.perf_counter()
+        focal_seeds = await self._eligible_seeds(
+            [m["name"] for m in matches], rel_filter
+        )
+        frontier = await self._frontier(limit=20)
+        primary, fallback = frontier_seed_candidates(frontier)
+        frontier_seeds = await self._eligible_seeds(primary, rel_filter)
+        if not frontier_seeds:
+            frontier_seeds = await self._eligible_seeds(fallback, rel_filter)
+        frontier_seeds = [n for n in frontier_seeds if n not in set(focal_seeds)]
+
+        # Concept-cluster expansion (EXPERIMENT-BARLOW B2): siblings one
+        # coherence hop from focal-matched Concepts — the adjacent concept
+        # that DID match bridges to the on-point node that could not
+        # (measured motivation: the Husserlian correction at 0/19 while its
+        # cluster rode 8/19). Enters the blend at a reduced bias.
+        expansion_seeds: list[str] = []
+        if expansion_bias > 0 and focal_seeds:
+            taken = set(focal_seeds) | set(frontier_seeds)
+            exp_res = await self.driver.execute_query(
+                lit(
+                    f"MATCH (s:Concept)-[:{rel_filter}]-(n) "
+                    "WHERE s.name IN $focal AND NOT n:Encounter "
+                    "RETURN DISTINCT n.name AS name LIMIT $lim"
+                ),
+                {"focal": focal_seeds, "lim": self._INFUSE_SEED_LIMIT * 2},
+                routing_=RoutingControl.READ,
+            )
+            expansion_seeds = [
+                r["name"] for r in exp_res.records if r["name"] not in taken
+            ][: self._INFUSE_SEED_LIMIT]
+
+        if focal_seeds and frontier_seeds:
+            seed_mode = "blended"
+        elif focal_seeds:
+            seed_mode = "focal_only"
+        elif frontier_seeds:
+            seed_mode = "frontier_only"
+        else:
+            seed_mode = "none"
+        timings["seeds"] = time.perf_counter() - t2
+
+        if seed_mode == "none":
+            # Nothing to awaken from: no focal match carries coherence
+            # structure and no frontier exists. Silence is a valid injection.
+            timings["total"] = time.perf_counter() - t0
+            return {
+                "mode": "full",
+                "payload": "",
+                "silence": True,
+                "seed_terms": seed_terms,
+                "seed_mode": seed_mode,
+                "focal_seeds": [],
+                "frontier_seeds": [],
+                "timings_ms": {k: round(v * 1000, 1) for k, v in timings.items()},
+            }
+
+        proj = f"__agent_memory_infuse_{uuid.uuid4().hex[:8]}__"
+        project_query = lit(
+            f"MATCH (source)-[r:{rel_filter}]->(target) "
+            f"WHERE ({source_labels}) AND ({target_labels}) "
+            "RETURN gds.graph.project($proj, source, target, {}, "
+            "{undirectedRelationshipTypes: ['*']}) AS g"
+        )
+        node_return = (
+            "RETURN n.name AS node, labels(n)[0] AS type, score "
+            "ORDER BY score DESC"
+        )
+        # One biased computation: node-bias source pairs, focal @1.0 +
+        # frontier @bias. Falls back to a two-pass blend (mathematically the
+        # same linear combination) on a GDS that lacks bias-pair sourceNodes —
+        # a guard in code; rank_mode records which path ran.
+        biased_query = lit(
+            "OPTIONAL MATCH (f) WHERE f.name IN $focal "
+            "WITH collect(DISTINCT f) AS fs "
+            "OPTIONAL MATCH (t) WHERE t.name IN $frontier "
+            "WITH fs, collect(DISTINCT t) AS ts "
+            "OPTIONAL MATCH (e) WHERE e.name IN $expansion "
+            "WITH fs, ts, collect(DISTINCT e) AS es "
+            "WITH [n IN fs | [id(n), 1.0]] + [n IN ts | [id(n), $bias]] "
+            "   + [n IN es | [id(n), $exp_bias]] AS pairs "
+            "CALL gds.pageRank.stream($proj, {sourceNodes: pairs}) "
+            "YIELD nodeId, score "
+            "WITH gds.util.asNode(nodeId) AS n, score WHERE score > 1e-9 "
+            f"{node_return}"
+        )
+        seeded_query = lit(
+            "MATCH (s) WHERE s.name IN $seed_names "
+            "WITH collect(DISTINCT s) AS seeds "
+            "CALL gds.pageRank.stream($proj, {sourceNodes: seeds}) "
+            "YIELD nodeId, score "
+            "WITH gds.util.asNode(nodeId) AS n, score "
+            f"{node_return}"
+        )
+        mass_query = lit(
+            "CALL gds.articleRank.stream($proj) YIELD nodeId, score "
+            "WITH gds.util.asNode(nodeId) AS n, score "
+            f"{node_return}"
+        )
+        drop_query = (
+            "CALL gds.graph.drop($proj, false) YIELD graphName RETURN graphName"
+        )
+
+        try:
+            t3 = time.perf_counter()
+            await self.driver.execute_query(
+                project_query, {"proj": proj}, routing_=RoutingControl.READ
+            )
+
+            rank_mode = "biased_single"
+            try:
+                res = await self.driver.execute_query(
+                    biased_query,
+                    {
+                        "proj": proj,
+                        "focal": focal_seeds,
+                        "frontier": frontier_seeds,
+                        "expansion": expansion_seeds,
+                        "bias": frontier_bias,
+                        "exp_bias": expansion_bias,
+                    },
+                    routing_=RoutingControl.READ,
+                )
+                biased_full = [dict(r) for r in res.records]
+            except Exception as exc:
+                logger.warning(
+                    f"infuse bias-pair rank unavailable, blending two passes: {exc}"
+                )
+                rank_mode = "blended_two_pass"
+
+                async def _pass(seed_names: list[str]) -> dict[str, dict[str, Any]]:
+                    if not seed_names:
+                        return {}
+                    res = await self.driver.execute_query(
+                        seeded_query,
+                        {"proj": proj, "seed_names": seed_names},
+                        routing_=RoutingControl.READ,
+                    )
+                    return {r["node"]: dict(r) for r in res.records}
+
+                focal_rows = await _pass(focal_seeds)
+                frontier_rows = await _pass(frontier_seeds)
+                expansion_rows = await _pass(expansion_seeds)
+                blended: dict[str, dict[str, Any]] = {}
+                for name, row in focal_rows.items():
+                    blended[name] = {**row, "score": row["score"]}
+                for rows, tier_bias in (
+                    (frontier_rows, frontier_bias),
+                    (expansion_rows, expansion_bias),
+                ):
+                    for name, row in rows.items():
+                        prev = blended.get(name)
+                        add = tier_bias * row["score"]
+                        if prev:
+                            prev["score"] += add
+                        else:
+                            blended[name] = {**row, "score": add}
+                biased_full = sorted(
+                    (r for r in blended.values() if r["score"] > 1e-9),
+                    key=lambda r: r["score"],
+                    reverse=True,
+                )
+            timings["rank"] = time.perf_counter() - t3
+
+            t4 = time.perf_counter()
+            res = await self.driver.execute_query(
+                mass_query, {"proj": proj}, routing_=RoutingControl.READ
+            )
+            mass_full = [dict(r) for r in res.records]
+            divergence = compute_divergence(mass_full, biased_full, result_limit)
+            timings["mass"] = time.perf_counter() - t4
+        finally:
+            await self.driver.execute_query(
+                drop_query, {"proj": proj}, routing_=RoutingControl.WRITE
+            )
+
+        top = biased_full[:result_limit]
+        top_names = [r["node"] for r in top]
+        rank_scores = {r["node"]: float(r["score"]) for r in top}
+
+        t5 = time.perf_counter()
+        conflicts = await self._conflicts_among(top_names)
+        # Divergence flags on payload nodes: big only because they are big.
+        top_set_early = set(top_names)
+        conflicts.extend(
+            {
+                "kind": "divergence",
+                "from_name": r["node"],
+                "mass_rank": r["mass_rank"],
+                "frontier_rank": r["frontier_rank"],
+            }
+            for r in (divergence or {}).get("well_suspects", [])
+            if r["node"] in top_set_early
+        )
+        core, parked = triage_conflicts(conflicts, rank_scores)
+
+        nbhd_res = await self.driver.execute_query(
+            "MATCH (a)-[r]-(b) "
+            "WHERE a.name IN $names AND b.name IN $names "
+            "AND NOT type(r) IN $process_edges "
+            "RETURN DISTINCT startNode(r).name AS from_name, type(r) AS rel, "
+            "       endNode(r).name AS to_name LIMIT 60",
+            {"names": top_names, "process_edges": sorted(PROCESS_EDGES)},
+            routing_=RoutingControl.READ,
+        )
+        nbhd_edges = [dict(r) for r in nbhd_res.records]
+
+        # TWO CLOCKS, and they are not the same clock. Delivery-age (the
+        # renewal ledger's turns-since-body) is how long since this locus was
+        # told; EPISTEMIC AGE (t_created / t_observed) is how long since the
+        # thing was noticed. The substrate tracked only the first, and B1's
+        # instrument would have inherited that blindness. Fetched here so the
+        # observe log can carry both — the open Question about whether a
+        # non-degrading past fails specifically for PERSONS (who, unlike
+        # technical claims, are never re-measured) is answerable from the same
+        # accumulation, joined on epistemic age rather than delivery age.
+        # Added before B1's window opens; adding it after would be changing
+        # the instrument mid-measurement.
+        desc_res = await self.driver.execute_query(
+            "MATCH (n) WHERE n.name IN $names AND NOT n:Encounter "
+            "RETURN n.name AS name, labels(n)[0] AS type, "
+            "       n.description AS description, "
+            "       toString(n.t_created) AS t_created, "
+            "       toString(n.t_observed) AS t_observed",
+            {"names": top_names},
+            routing_=RoutingControl.READ,
+        )
+        by_name = {r["name"]: dict(r) for r in desc_res.records}
+        nbhd_nodes = [by_name[n] for n in top_names if n in by_name]
+
+        # Renewal: split into fresh bodies and standing handles. Stateless
+        # callers (no locus) get v0.5.x behavior — everything fresh.
+        standing_nodes: list[dict[str, Any]] = []
+        turn = 0
+        ledger: dict[str, dict[str, Any]] | None = None
+        fingerprints: dict[str, str] = {}
+        if locus_key is not None:
+            turn = self._locus_turn.get(locus_key, 0) + 1
+            self._locus_turn[locus_key] = turn
+            ledger = self._ledger_for(locus_key)
+            nbhd_nodes, standing_nodes, fingerprints = renewal_partition(
+                nbhd_nodes, ledger, turn, refresh_turns=refresh_turns
+            )
+            nbhd_edges = renewal_filter_edges(
+                nbhd_edges, ledger, turn, refresh_turns=refresh_turns
+            )
+
+        top_set = set(top_names)
+        open_threads = [
+            {"type": "Question", "name": r["name"]}
+            for r in frontier["unanswered_questions"]
+            if r["name"] in top_set
+        ] + [
+            {"type": "Hypothesis", "name": r["name"]}
+            for r in frontier["untested_hypotheses"]
+            if r["name"] in top_set
+        ] + [
+            {"type": "Hypothesis (contested)", "name": r["name"]}
+            for r in frontier["contested_hypotheses"]
+            if r["name"] in top_set
+        ]
+
+        trajectory = await self._anchors_for(top_names)
+        timings["assemble"] = time.perf_counter() - t5
+
+        payload, delivered = format_payload(
+            seed_terms=seed_terms,
+            seed_mode=seed_mode,
+            core_conflicts=core,
+            parked_conflicts=parked,
+            neighborhood_nodes=nbhd_nodes,
+            neighborhood_edges=nbhd_edges,
+            open_threads=open_threads,
+            trajectory=trajectory,
+            max_chars=max_chars,
+            standing_nodes=standing_nodes,
+        )
+
+        # Delivery-gated ledger stamp (v0.7.1). Only bodies that actually
+        # survived the squeeze reset their clock; a selected-but-dropped
+        # body keeps its previous last_full and re-delivers next turn.
+        # Stamping from selection produced 31 phantom delivery records in a
+        # 7-turn session and would have handed B1 a corrupted x-axis.
+        if ledger is not None:
+            commit_delivery(ledger, fingerprints, delivered["bodies"], turn)
+
+        # B2b provenance (EXPERIMENT-BARLOW): the pre-committed
+        # focal-dominance check needs to know which delivered bodies arrived
+        # by focal match and which by concept-cluster expansion. Without it
+        # the check is registered but uncomputable — recorded per node as
+        # seed-set membership, which is what the B2 benchmark measured.
+        _focal, _exp = set(focal_seeds), set(expansion_seeds)
+        _frontier = set(frontier_seeds)
+
+        def _origin(name: str) -> str:
+            if name in _focal:
+                return "focal"
+            if name in _exp:
+                return "expansion"
+            if name in _frontier:
+                return "frontier"
+            return "ranked"  # reached by the rank, not itself a seed
+
+        timings["total"] = time.perf_counter() - t0
+        return {
+            "mode": "full",
+            "payload": payload,
+            "silence": payload == "",
+            "seed_terms": seed_terms,
+            "seed_mode": seed_mode,
+            "rank_mode": rank_mode,
+            "focal_seeds": focal_seeds,
+            "frontier_seeds": frontier_seeds,
+            "frontier_bias": frontier_bias,
+            "expansion_seeds": expansion_seeds,
+            "expansion_bias": expansion_bias,
+            "turn": turn,
+            "renewal": {
+                # SELECTED — what the partition chose this turn.
+                "fresh": [n["name"] for n in nbhd_nodes],
+                "standing": [s_["name"] for s_ in standing_nodes],
+                # DELIVERED — what reached the payload. B1 joins on THIS.
+                "delivered_bodies": delivered["bodies"],
+                "delivered_handles": delivered["handles"],
+                # The gap between them, named rather than left to inference.
+                "dropped_bodies": [
+                    n["name"] for n in nbhd_nodes
+                    if n["name"] not in set(delivered["bodies"])
+                ],
+                "dropped_handles": [
+                    s_["name"] for s_ in standing_nodes
+                    if s_["name"] not in set(delivered["handles"])
+                ],
+                # B2b: per-delivered-body seed provenance.
+                "body_origin": {
+                    n: _origin(n) for n in delivered["bodies"]
+                },
+                # The SECOND clock. Delivery-age lives in the ledger above;
+                # this is epistemic age — when the node was noticed, not when
+                # it was last told. B1 joins on the first; the person question
+                # joins on this one, off the same accumulation.
+                "epistemic_age": {
+                    n["name"]: {
+                        "t_created": n.get("t_created"),
+                        "t_observed": n.get("t_observed"),
+                    }
+                    for n in nbhd_nodes
+                    if n["name"] in set(delivered["bodies"])
+                },
+            },
+            "counts": {
+                "ranked": len(biased_full),
+                "payload_nodes": len(nbhd_nodes),
+                "standing": len(standing_nodes),
+                "delivered_bodies": len(delivered["bodies"]),
+                "delivered_handles": len(delivered["handles"]),
+                "dropped_bodies": len(nbhd_nodes) - len(delivered["bodies"]),
+                "dropped_handles": len(standing_nodes) - len(delivered["handles"]),
+                "expansion_bodies": sum(
+                    1 for n in delivered["bodies"] if _origin(n) == "expansion"
+                ),
+                "focal_bodies": sum(
+                    1 for n in delivered["bodies"] if _origin(n) == "focal"
+                ),
+                "core_conflicts": len(core),
+                "parked_conflicts": len(parked),
+                "open_threads": len(open_threads),
+            },
+            "timings_ms": {k: round(v * 1000, 1) for k, v in timings.items()},
+        }
 
     async def close_encounter(
         self,

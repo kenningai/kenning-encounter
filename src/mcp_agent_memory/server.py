@@ -97,6 +97,8 @@ def create_mcp_server(
     agent_memory: Neo4jAgentMemory,
     namespace: str = "",
     read_timeout: int = 30,
+    infuse_frontier_bias: float = 0.3,
+    infuse_refresh_turns: int = 10,
 ) -> FastMCP:
     """Create an MCP server instance for the Agent Memory."""
 
@@ -808,6 +810,87 @@ def create_mcp_server(
             result = await agent_memory.orient(result_limit=result_limit)
             return _json_result(result)
 
+    @mcp.tool(
+        name=ns + "infuse",
+        annotations=ToolAnnotations(
+            title="Infuse (Governed Passive Synthesis)", readOnlyHint=True,
+            destructiveHint=False, idempotentHint=True, openWorldHint=False,
+        ),
+    )
+    async def infuse(
+        text: str = Field(
+            ...,
+            description=(
+                "The arriving present: the user prompt (mode 'full') or the "
+                "tool-result batch text (mode 'delta') to awaken the substrate "
+                "against."
+            ),
+        ),
+        mode: Literal["full", "delta"] = Field(
+            default="full",
+            description=(
+                "'full' = the complete governed disposition (with every user "
+                "prompt); 'delta' = recognition/conflict only, else silence "
+                "(at tool-batch boundaries)."
+            ),
+        ),
+        frontier_bias: float | None = Field(
+            default=None, ge=0.0, le=1.0,
+            description=(
+                "Override the frontier seed bias for this call (default: the "
+                "server's configured governor, normally 0.3). A tunable whose "
+                "correct value is an empirical question."
+            ),
+        ),
+        max_chars: int = Field(
+            default=10_000, ge=500, le=10_000,
+            description="Hard payload budget (the harness injection cap is 10,000).",
+        ),
+        expansion_bias: float | None = Field(
+            default=None, ge=0.0, le=1.0,
+            description=(
+                "Override the concept-cluster expansion bias (default 0.5; "
+                "0 disables expansion — used by the B2 benchmark's OFF arm)."
+            ),
+        ),
+        ctx: Context | None = None,
+    ) -> ToolResult:
+        """The governed infusion read — mechanized passive synthesis.
+
+        Re-awakens a topologically-relevant projection of the substrate
+        against the arriving present: Extract (focal signals) -> Match
+        (fulltext) -> Rank (ONE biased computation: focal seeds @1.0 blended
+        with the standing frontier @~0.3, over an ephemeral coherence-only
+        projection, divergence-checked against unbiased mass) -> Format
+        (signed payload, coherence tension first). NOT retrieval — the payload
+        answers "what is the topology of what I already hold about this?".
+
+        Governance, structurally: the payload is SIGNED (a proposal from the
+        sediment, not a conclusion — an unsigned payload would be heteronomous
+        choice wearing autonomous clothes); conflict leads, triaged by
+        constitutive proximity (core conflicts at full amplitude, peripheral
+        ones carried in a parked-tensions register — noted, unresolved,
+        non-blocking); divergence flags name what is big only because it is
+        big; and silence is a valid injection — a substrate with nothing to
+        say about this present says nothing.
+
+        Surfaces — never authors. Reads only; the write pathway stays
+        separate, authored, and yours.
+        """
+        async with _tool_errors("infuse"):
+            result = await agent_memory.infuse(
+                text=text,
+                mode=mode,
+                frontier_bias=(
+                    infuse_frontier_bias if frontier_bias is None else frontier_bias
+                ),
+                max_chars=max_chars,
+                refresh_turns=infuse_refresh_turns,
+                expansion_bias=expansion_bias,
+                locus_key=_locus_key(ctx) if ctx else None,
+            )
+            return _json_result(result)
+
     # -- Operations Manual (the discipline, served as a resource) -------------
 
     @mcp.resource(
@@ -842,6 +925,8 @@ async def main(
     allow_origins: list[str] = [],
     allowed_hosts: list[str] = [],
     read_timeout: int = 30,
+    infuse_frontier_bias: float = 0.3,
+    infuse_refresh_turns: int = 10,
 ) -> None:
     logger.info("Starting Agent Memory MCP Server")
     logger.info(f"Connecting to Neo4j at: {neo4j_uri}")
@@ -884,7 +969,11 @@ async def main(
         Middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts),
     ]
 
-    mcp = create_mcp_server(agent_memory, namespace, read_timeout=read_timeout)
+    mcp = create_mcp_server(
+        agent_memory, namespace, read_timeout=read_timeout,
+        infuse_frontier_bias=infuse_frontier_bias,
+        infuse_refresh_turns=infuse_refresh_turns,
+    )
 
     try:
         match transport:

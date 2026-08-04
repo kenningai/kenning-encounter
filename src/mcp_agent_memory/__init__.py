@@ -39,6 +39,20 @@ def main():
         "--read-timeout", type=int, default=None,
         help="Read query timeout in seconds (default: 30)",
     )
+    parser.add_argument(
+        "--infuse-frontier-bias", type=float, default=None,
+        help=(
+            "Frontier seed bias for the governed infusion blend, 0.0-1.0 "
+            "(default: 0.3)"
+        ),
+    )
+    parser.add_argument(
+        "--infuse-refresh-turns", type=int, default=None,
+        help=(
+            "Renewal refresh horizon: turns before a standing body "
+            "re-delivers (default: 10; EXPERIMENT-BARLOW B1 will place it)"
+        ),
+    )
 
     args = parser.parse_args()
     config = process_config(args)
