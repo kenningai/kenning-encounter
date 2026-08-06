@@ -124,6 +124,41 @@ client for Claude Code-style harnesses: full mode on each user prompt, delta
 mode per tool call. If the server is down, the hook stays silent — the agent
 just runs uninfused.
 
+### Wiring the hook
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command",
+      "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py --mode full" }] }]
+  }
+}
+```
+
+Hook configuration: `AGENT_MEMORY_MCP_URL` (default
+`http://127.0.0.1:8003/mcp/`) or `--url`; `AGENT_MEMORY_INFUSE_TIMEOUT`
+seconds (default `10.0`) or `--timeout`; `AGENT_MEMORY_INFUSE_SHADOW_LOG` /
+`AGENT_MEMORY_INFUSE_OBSERVE_LOG` for the shadow and observation streams.
+The timeout default is sized to the **cold first call** — the first prompt
+of a session ranks against a cold Neo4j page cache at roughly 10× the warm
+cost, and because the hook is fail-silent, a budget that only fits the warm
+call fails invisibly at exactly the moment re-entry matters.
+
+Deployment notes, each learned from a real deployment:
+
+- **Absolute interpreter path, always.** Hook processes do not inherit an
+  interactive shell PATH; a bare `python3` can resolve to an ancient system
+  interpreter. The hook requires Python 3.12+ and refuses older interpreters
+  cleanly (exit 0, one line on stderr) rather than crashing mid-import.
+- **Project-scoped settings, never global.** Wire the hook in the
+  *project's* `.claude/settings.json`. A hook in the global settings would
+  inject this substrate's memories into every unrelated session on the
+  machine, pointed at a graph that has nothing to do with that work.
+- **Stage it.** Run `--shadow` for a few real sessions first — it computes
+  everything and injects nothing, logging what *would* have been surfaced,
+  so you read the payloads before they condition a live turn. Wire
+  `UserPromptSubmit` alone before adding the high-frequency delta channel.
+
 ## Quick start
 
 ```bash

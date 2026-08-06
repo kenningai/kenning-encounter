@@ -17,18 +17,25 @@ wire the delta to PostToolUse instead: the server's per-locus novelty gate
 keeps the same at-most-once-per-fact-state semantics either way — the
 cadence derives from the substrate, not the scheduler.
 
-Example .claude/settings.json wiring:
+Example .claude/settings.json wiring (use an ABSOLUTE interpreter path: hook
+processes do not inherit an interactive shell PATH, and a bare `python3` can
+resolve to an ancient system interpreter):
 
   {
     "hooks": {
       "UserPromptSubmit": [{ "hooks": [{ "type": "command",
-        "command": "python3 /path/to/scripts/agent_memory_infuse_hook.py --mode full" }] }],
+        "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py --mode full" }] }],
       "PostToolBatch": [{ "hooks": [{ "type": "command",
-        "command": "python3 /path/to/scripts/agent_memory_infuse_hook.py --mode delta" }] }]
+        "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py --mode delta" }] }]
     }
   }
 
-Configuration: Agent Memory_MCP_URL (default http://127.0.0.1:8003/mcp/) or --url.
+Configuration: AGENT_MEMORY_MCP_URL (default http://127.0.0.1:8003/mcp/) or --url;
+AGENT_MEMORY_INFUSE_TIMEOUT seconds (default 10.0) or --timeout. The default budget
+covers the COLD first call of a session: rank against a cold Neo4j page cache
+costs roughly 10x the warm call, and the first prompt is exactly when
+re-entry matters — a budget sized to the warm call fails silently at the one
+moment the hook exists for.
 
 Design constraints, from the spec:
 - FAIL SILENT. An infusion that feels broken will be disabled; a broken one
@@ -39,14 +46,14 @@ Design constraints, from the spec:
 
 Shadow mode (--shadow): compute everything, inject nothing. Every result —
 payload, seed_mode, counts, suppression, timings — is appended as one JSON
-line to Agent Memory_INFUSE_SHADOW_LOG (default ~/.claude/agent_memory-infuse-shadow.jsonl)
+line to AGENT_MEMORY_INFUSE_SHADOW_LOG (default ~/.claude/agent_memory-infuse-shadow.jsonl)
 and stdout stays empty. This is the zero-constitutive-risk dress rehearsal:
 run the wired hooks in shadow for a few wakings against the live substrate
 to observe seed quality, delta fire rate, real-graph latency, and the
 parked-tensions register at scale, BEFORE the first governed payload is
 allowed to condition a live write.
 
-Observation log (Agent Memory_INFUSE_OBSERVE_LOG=<path>): when set, EVERY call —
+Observation log (AGENT_MEMORY_INFUSE_OBSERVE_LOG=<path>): when set, EVERY call —
 injected or silent — appends the same full record (plus an `injected`
 flag) to <path>, independent of shadow mode. This is the out-of-band
 measurement stream for the infusion experiment: the harness transcript
@@ -58,26 +65,44 @@ file; a subject reading its own measurement stream contaminates the
 measures. Keep it outside the project tree; analysis is the observer's.
 
 Speaks MCP streamable-http directly with stdlib only (urllib) — no
-dependencies, so the hook can run under any python3 without a venv.
+dependencies, no venv. Requires Python 3.12+: the floor is the oldest
+interpreter this hook is actually operated and tested under, not the oldest
+that could parse it — an interpreter we never run is a behavior surface we
+never verified. Older interpreters are refused cleanly at startup (exit 0,
+one line on stderr) instead of crashing mid-import.
 """
+
+import sys
+
+# Interpreter floor — enforced BEFORE the rest of the module executes. The
+# PEP 604 annotations below raise at def-time on older interpreters, which
+# would crash the script before main()'s fail-silent guard exists. The
+# refusal IS the fail-silent path: exit 0 toward the harness, one stderr
+# line for the operator running the hook by hand.
+MIN_PYTHON = (3, 12)
+if sys.version_info < MIN_PYTHON:
+    sys.stderr.write(
+        f"agent_memory_infuse_hook: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, "
+        f"running {sys.version.split()[0]} ({sys.executable}) — wire the hook "
+        "to an absolute path of a supported interpreter.\n")
+    sys.exit(0)
 
 import argparse
 import hashlib
 import json
 import os
 import re
-import sys
 import tempfile
 import time
 import urllib.request
 
-DEFAULT_URL = os.environ.get("Agent Memory_MCP_URL", "http://127.0.0.1:8003/mcp/")
-TIMEOUT_S = float(os.environ.get("Agent Memory_INFUSE_TIMEOUT", "3.0"))
+DEFAULT_URL = os.environ.get("AGENT_MEMORY_MCP_URL", "http://127.0.0.1:8003/mcp/")
+TIMEOUT_S = float(os.environ.get("AGENT_MEMORY_INFUSE_TIMEOUT", "10.0"))
 SHADOW_LOG = os.environ.get(
-    "Agent Memory_INFUSE_SHADOW_LOG",
+    "AGENT_MEMORY_INFUSE_SHADOW_LOG",
     os.path.expanduser("~/.claude/agent_memory-infuse-shadow.jsonl"),
 )
-OBSERVE_LOG = os.environ.get("Agent Memory_INFUSE_OBSERVE_LOG")  # unset = no observation
+OBSERVE_LOG = os.environ.get("AGENT_MEMORY_INFUSE_OBSERVE_LOG")  # unset = no observation
 PROTOCOL_VERSION = "2025-06-18"
 _DATA_RE = re.compile(r"^data: ?(.*)$", re.MULTILINE)
 
@@ -174,19 +199,33 @@ def _append_log(path: str, record: dict) -> None:
 
 
 def main() -> int:
+    global TIMEOUT_S
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["full", "delta"], default="full")
     parser.add_argument("--url", default=DEFAULT_URL)
+    parser.add_argument(
+        "--timeout", type=float, default=None,
+        help="Request timeout in seconds (overrides AGENT_MEMORY_INFUSE_TIMEOUT; "
+             "default 10 — sized to the cold first call, not the warm repeat).",
+    )
     parser.add_argument(
         "--shadow", action="store_true",
         help="Compute and log the infusion, inject nothing.",
     )
     args = parser.parse_args()
+    if args.timeout is not None:
+        TIMEOUT_S = args.timeout
 
     hook_input = json.load(sys.stdin)
     text = _focal_text(hook_input, args.mode)
     if not text.strip():
         return 0
+
+    # The join anchor for the observation stream: sha256 of the stripped
+    # focal text, first 16 hex. The invocation scorer hashes each transcript
+    # prompt identically and joins on it — a missed call then reads as a
+    # counted gap instead of shearing every index-pair after it.
+    psha = hashlib.sha256(text.strip().encode()).hexdigest()[:16]
 
     cache = _session_cache_path(args.url, str(hook_input.get("session_id", "")))
     sid = None
@@ -195,15 +234,30 @@ def main() -> int:
             sid = f.read().strip() or None
 
     try:
-        result = _call_infuse(args.url, sid, text, args.mode) if sid else {}
-        if not sid:
-            raise RuntimeError("no cached session")
-    except Exception:
-        # Session lost (server restart) or never existed — one re-initialize.
-        sid = _initialize(args.url)
-        if not sid:
-            return 0
-        result = _call_infuse(args.url, sid, text, args.mode)
+        try:
+            result = _call_infuse(args.url, sid, text, args.mode) if sid else {}
+            if not sid:
+                raise RuntimeError("no cached session")
+        except Exception:
+            # Session lost (server restart) or never existed — one re-initialize.
+            sid = _initialize(args.url)
+            if not sid:
+                raise RuntimeError("initialize failed")
+            result = _call_infuse(args.url, sid, text, args.mode)
+    except Exception as exc:
+        # Fail silent toward the harness — but the observation stream records
+        # the attempt. An unlogged failure is what made the positional join
+        # unrepairable: the payload sequence sheared with no visible gap.
+        if OBSERVE_LOG:
+            _append_log(OBSERVE_LOG, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "session_id": str(hook_input.get("session_id", "")),
+                "event": hook_input.get("hook_event_name", ""),
+                "mode": args.mode,
+                "prompt_sha": psha,
+                "error": type(exc).__name__,
+            })
+        return 0
 
     with open(cache, "w") as f:
         f.write(sid)
@@ -214,6 +268,7 @@ def main() -> int:
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "session_id": str(hook_input.get("session_id", "")),
         "event": hook_input.get("hook_event_name", ""),
+        "prompt_sha": psha,
         "mode": result.get("mode", args.mode),
         "silence": result.get("silence"),
         "seed_mode": result.get("seed_mode"),
