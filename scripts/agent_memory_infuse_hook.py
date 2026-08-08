@@ -103,6 +103,58 @@ SHADOW_LOG = os.environ.get(
     os.path.expanduser("~/.claude/agent_memory-infuse-shadow.jsonl"),
 )
 OBSERVE_LOG = os.environ.get("AGENT_MEMORY_INFUSE_OBSERVE_LOG")  # unset = no observation
+
+# ---------------------------------------------------------------------------
+# Full-mode gating: a prompt injection belongs to a prompt somebody WROTE.
+#
+# THE PARADIGM SPLIT, measured on a live headless agent (2026-08-07). In an
+# interactive session each prompt carries new intentionality from a second
+# party, which is exactly what the per-prompt injection point is for. A
+# scheduled run is a MONOLOGUE: one fixed trigger string, then autonomous
+# work. There is no second party, so the per-prompt point has nothing to
+# carry — the only place new content enters is tool results, which is the
+# delta channel's job.
+#
+# Left ungated, full mode in a scheduled run is not merely noisy, it builds
+# a gravity well. The trigger is byte-identical every waking, so Extract
+# yields identical seeds forever; the renewal ledger is session-scoped and a
+# waking IS a session, so the ledger is cold every time and the same bodies
+# arrive at FULL WEIGHT at the top of every cycle, in perpetuity. The
+# renewal economy — the mechanism whose whole purpose is to stop the channel
+# droning a permanent core — cannot reach across the session boundary.
+# Measured: 16 bodies, 0 handles, 0 standing on every scheduled full call.
+#
+# THE DISCRIMINATOR is the harness's own, not a heuristic on prompt text:
+# Claude Code sets CLAUDE_CODE_ENTRYPOINT=cli for an interactive session and
+# sdk-cli under `claude -p`. Detecting INTERACTIVE positively (rather than
+# enumerating headless runners we cannot know) means an unrecognised harness
+# degrades toward SILENCE, never toward drone — the safe direction, and the
+# design's own "silence is a valid injection" principle applied one level
+# earlier. Operators whose harness we misclassify have an explicit override.
+INTERACTIVE_ENTRYPOINTS = frozenset({"cli"})
+FULL_MODE_POLICY = os.environ.get("AGENT_MEMORY_INFUSE_FULL", "interactive").lower()
+
+
+def full_mode_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """(allowed, reason) for a full-mode call under the current harness.
+
+    Returns the reason either way so the observation stream can record WHY a
+    call was skipped. A guard that suppresses silently is indistinguishable
+    from a guard that is broken — this project has shipped that mistake
+    three times, and the observe log is where it gets caught.
+    """
+    env = os.environ if env is None else env
+    policy = (env.get("AGENT_MEMORY_INFUSE_FULL", FULL_MODE_POLICY) or "interactive").lower()
+    if policy == "always":
+        return True, "policy=always"
+    if policy == "never":
+        return False, "policy=never"
+    entrypoint = env.get("CLAUDE_CODE_ENTRYPOINT", "")
+    if not entrypoint:
+        return False, "no CLAUDE_CODE_ENTRYPOINT — harness unrecognised, degrading to silence"
+    if entrypoint in INTERACTIVE_ENTRYPOINTS:
+        return True, f"interactive entrypoint ({entrypoint})"
+    return False, f"non-interactive entrypoint ({entrypoint}) — scheduled run is a monologue"
 PROTOCOL_VERSION = "2025-06-18"
 _DATA_RE = re.compile(r"^data: ?(.*)$", re.MULTILINE)
 
@@ -217,6 +269,26 @@ def main() -> int:
         TIMEOUT_S = args.timeout
 
     hook_input = json.load(sys.stdin)
+
+    # Gate full mode BEFORE any network call: a scheduled run's trigger is a
+    # ritual string, and infusing on it drones a permanent core (see
+    # full_mode_allowed). The skip is RECORDED, never silent — an invisible
+    # guard is the failure mode this whole apparatus keeps rediscovering.
+    if args.mode == "full":
+        allowed, why = full_mode_allowed()
+        if not allowed:
+            if OBSERVE_LOG:
+                _append_log(OBSERVE_LOG, {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "session_id": str(hook_input.get("session_id", "")),
+                    "event": hook_input.get("hook_event_name", ""),
+                    "mode": args.mode,
+                    "injected": False,
+                    "skipped": True,
+                    "skip_reason": why,
+                })
+            return 0
+
     text = _focal_text(hook_input, args.mode)
     if not text.strip():
         return 0

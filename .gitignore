@@ -30,3 +30,4 @@ venv/
 publish/.staging/
 publish/.target
 *.pdf
+EXPERIENCE_HOWTO.xml

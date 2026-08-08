@@ -90,6 +90,49 @@ class TestExtract:
         text = " ".join(f"uniqueterm{i}" for i in range(100))
         assert len(extract_focal_signals(text, max_terms=10)) == 10
 
+    def test_harness_envelope_noise_excluded(self):
+        # A PostToolUse batch arrives wrapped in transport: content-block keys,
+        # tool-use ids, mcp__ tool names, notification field names. None of it
+        # is the subject; all of it is identifier-shaped enough to have ridden
+        # the hard-signal weight before the filter existed.
+        out = extract_focal_signals(
+            '{"type": "text", "text": "corridor annotated", '
+            '"tool_use_id": "toolu_01AbCdEfGh", '
+            '"tool_name": "mcp__agent_memory__advance_encounter"} '
+            "<task-notification><task-id>b452tvc2l</task-id>"
+            "<tool-use-id>x</tool-use-id><output-file>y</output-file>"
+        )
+        terms = {s["term"].lower() for s in out}
+        assert terms.isdisjoint(
+            {"type", "text", "tool_use_id", "tool_name",
+             "task-notification", "task-id", "tool-use-id", "output-file"}
+        )
+        assert not any(t.startswith(("mcp__", "toolu_")) for t in terms)
+        # The content inside the envelope survives.
+        assert "corridor" in terms and "annotated" in terms
+
+    def test_unicode_escape_artifacts_excluded(self):
+        # A serialized em-dash reaches the word regex as the literal text
+        # u2014; the fragment class, not just the one codepoint, is filtered.
+        # The input must carry the ESCAPED form — a real em-dash never produces
+        # the artifact, and would pass vacuously without the filter.
+        out = extract_focal_signals(
+            "the corridor \\u2014 eligibility \\u00e9 refused aliasing"
+        )
+        terms = {s["term"].lower() for s in out}
+        assert terms.isdisjoint({"u2014", "u00e9"})
+        assert {"corridor", "eligibility", "refused", "aliasing"} <= terms
+
+    def test_domain_identifiers_survive_envelope_filter(self):
+        # Two-sided: the filter must say no to plumbing and yes to real
+        # snake/kebab domain names of the same shape.
+        out = extract_focal_signals(
+            "why does paloalto_flow_upsert differ from ddc-systems-omu extraction"
+        )
+        terms = [s["term"] for s in out]
+        assert "paloalto_flow_upsert" in terms
+        assert "ddc-systems-omu" in terms
+
 
 # -- Match query ------------------------------------------------------------------
 

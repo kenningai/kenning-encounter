@@ -53,6 +53,35 @@ _STOPWORDS = frozenset(
     """.split()
 )
 
+# Harness-envelope noise — vocabulary the transport wraps around the content,
+# never the content itself. Measured live (the 2026-08-07 waking's own payload
+# headers): task-notification plumbing consumed entire delta seed budgets, and
+# because these tokens are identifier-shaped they rode the hard-signal weight.
+# Three classes, each named in the B1 follow-up work order:
+#   (1) harness-minted identifiers — mcp__<server>__<tool> names and toolu_*
+#       tool-use ids;
+#   (2) the envelope's own structural vocabulary — the fixed field names of the
+#       hook payload / tool_response wrapper (snake and kebab forms), plus the
+#       bare content-block keys "type"/"text" that recur once per block;
+#   (3) unicode-escape fragments — a serialized em-dash reaches the word regex
+#       as the literal text u2014.
+# Deliberately NOT filtered: bare common words that double as envelope keys
+# (status, output, result, summary…) — they are also real prose, and the
+# over-filtering-costs-recall rule above outranks envelope hygiene for them.
+_ENVELOPE_NOISE_RE = re.compile(r"^(?:mcp__|toolu_)|^u[0-9a-f]{4}$", re.IGNORECASE)
+_ENVELOPE_KEYS = frozenset(
+    """type text
+    tool_use_id tool_name tool_input tool_response tool_result
+    session_id transcript_path hook_event_name
+    task-notification task-id tool-use-id output-file
+    """.split()
+)
+
+
+def _is_envelope_noise(key: str) -> bool:
+    return key in _ENVELOPE_KEYS or _ENVELOPE_NOISE_RE.match(key) is not None
+
+
 # Hard focal signals — always extracted at full weight regardless of position:
 # IPv4 addresses (optionally CIDR) and dotted names (hostnames, FQDNs,
 # index/table names). The kind of term an infrastructure encounter pivots on.
@@ -92,7 +121,7 @@ def extract_focal_signals(text: str, max_terms: int = 24) -> list[dict[str, Any]
 
     def _add(term: str, weight: float) -> None:
         key = term.lower()
-        if key in _STOPWORDS or len(key) < 3:
+        if key in _STOPWORDS or len(key) < 3 or _is_envelope_noise(key):
             return
         scores[key] = scores.get(key, 0.0) + weight
         display.setdefault(key, term)
@@ -116,7 +145,7 @@ def extract_focal_signals(text: str, max_terms: int = 24) -> list[dict[str, Any]
         middle_display: dict[str, str] = {}
         for w in words[_HEAD_TOKENS:-_TAIL_TOKENS]:
             key = w.lower()
-            if key in _STOPWORDS or len(key) < 3:
+            if key in _STOPWORDS or len(key) < 3 or _is_envelope_noise(key):
                 continue
             middle[key] = middle.get(key, 0) + 1
             middle_display.setdefault(key, w)
