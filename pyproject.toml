@@ -1,6 +1,6 @@
 [project]
 name = "mcp-agent-memory"
-version = "0.5.3"
+version = "0.6.0"
 description = "Structured, persistent working memory for LLM agents over Neo4j — accumulate, recall, and reason across sessions, with tool-enforced integrity"
 readme = "README.md"
 requires-python = ">=3.13"

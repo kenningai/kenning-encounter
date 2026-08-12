@@ -11,12 +11,16 @@ import pytest
 
 from mcp_agent_memory.agent_memory import Neo4jAgentMemory, frontier_seed_candidates, validate_entity
 from mcp_agent_memory.infuse import (
+    commit_progression,
     delta_novelty,
     extract_focal_signals,
     format_delta,
     commit_delivery,
     format_payload,
+    format_progression,
+    group_progressions,
     lucene_query,
+    progression_renewal,
     renewal_filter_edges,
     renewal_partition,
     triage_conflicts,
@@ -897,3 +901,299 @@ class TestInfuseConfig:
         assert process_config(
             self._args(infuse_refresh_turns=0)
         )["infuse_refresh_turns"] == 1
+
+
+# -- Progression assembly (v0.8.0, the progression reform) -----------------------
+
+
+def _dell_steps():
+    """The Dell/CNTLM progression — the standing falsification case."""
+    mk = lambda name, sk, type_="Observation", desc="": {
+        "name": name, "type": type_, "description": desc,
+        "sort_key": sk, "encounter": "Encounter Aug", "enc_t": sk,
+    }
+    return [
+        mk("XE8640 discovery: sole constraint is stale cntlm credentials",
+           "2026-08-03T17:10:00Z",
+           desc="4x H100 healthy; cntlm creds stale on the jump-box proxy."),
+        mk("Conor repointed cntlm's parent endpoint and full egress returned",
+           "2026-08-03T17:35:00Z", desc="HF weights stream; pypi passes."),
+        mk("First light: gpt-oss-20b at 323 tok/s", "2026-08-03T18:55:00Z"),
+        mk("gpt-oss-120b live at 222 tok/s", "2026-08-04T02:45:00Z"),
+        mk("Mistral Large 2411 serving", "2026-08-08T00:55:00Z"),
+        mk("Medium 3.5 serving at 256k", "2026-08-08T09:50:00Z",
+           desc="497k-token KV cache; tokenizer-mode mistral."),
+        mk("What is the production serving configuration?",
+           "2026-08-08T10:00:00Z", type_="Question"),
+    ]
+
+
+def _rows_for(component, steps):
+    return [{**s, "component": component} for s in steps]
+
+
+class TestGroupProgressions:
+    def test_one_progression_per_component_regardless_of_seeds(self):
+        rows = _rows_for("stnamcvdl200", _dell_steps())
+        groups = group_progressions(
+            rows,
+            ["XE8640 discovery: sole constraint is stale cntlm credentials",
+             "Medium 3.5 serving at 256k"],
+        )
+        assert len(groups) == 1
+        assert groups[0]["component"] == "stnamcvdl200"
+        assert len(groups[0]["seed_names"]) == 2
+
+    def test_steps_ordered_by_coalesced_noticing_time(self):
+        rows = list(reversed(_rows_for("comp", _dell_steps())))
+        groups = group_progressions(rows, ["Mistral Large 2411 serving"])
+        names = [s["name"] for s in groups[0]["steps"]]
+        assert names[0].startswith("XE8640 discovery")
+        assert names[-1].startswith("What is the production")
+
+    def test_encounter_t_exist_breaks_noticing_time_ties(self):
+        # Structural tiebreak: same noticing stamp, different serialized
+        # encounter creation order — the later encounter's step sorts later.
+        mk = lambda name, enc_t: {
+            "name": name, "type": "Observation", "description": "",
+            "sort_key": "2026-08-03T17:00:00Z", "encounter": "E",
+            "enc_t": enc_t, "component": "comp",
+        }
+        rows = [mk("later-encounter step", "2026-08-03T18:00"),
+                mk("earlier-encounter step", "2026-08-03T16:00")]
+        groups = group_progressions(rows, ["earlier-encounter step"])
+        names = [s["name"] for s in groups[0]["steps"]]
+        assert names == ["earlier-encounter step", "later-encounter step"]
+
+    def test_single_step_component_is_not_a_progression(self):
+        rows = _rows_for("solo", _dell_steps()[:1])
+        assert group_progressions(rows, [rows[0]["name"]]) == []
+
+    def test_component_without_a_selected_member_is_excluded(self):
+        rows = _rows_for("comp", _dell_steps())
+        assert group_progressions(rows, ["unrelated node"]) == []
+
+    def test_multi_component_membership_appears_in_both(self):
+        shared = _dell_steps()[0]
+        rows = (_rows_for("comp-a", _dell_steps()[:3])
+                + _rows_for("comp-b", [shared, _dell_steps()[3]]))
+        groups = group_progressions(rows, [shared["name"]])
+        assert {g["component"] for g in groups} == {"comp-a", "comp-b"}
+
+
+class TestProgressionRenewal:
+    def test_first_sight_is_full(self):
+        form, fp, new = progression_renewal("comp", _dell_steps(), {}, 1)
+        assert form == "full" and new == [] and fp.startswith("prog|")
+
+    def test_unchanged_and_fresh_is_standing(self):
+        steps = _dell_steps()
+        ledger: dict = {}
+        _, fp, _ = progression_renewal("comp", steps, ledger, 1)
+        commit_progression(ledger, "comp", fp, [s["name"] for s in steps], 1)
+        form, _, _ = progression_renewal("comp", steps, ledger, 3)
+        assert form == "standing"
+
+    def test_unchanged_and_stale_is_full_again(self):
+        steps = _dell_steps()
+        ledger: dict = {}
+        _, fp, _ = progression_renewal("comp", steps, ledger, 1)
+        commit_progression(ledger, "comp", fp, [s["name"] for s in steps], 1)
+        form, _, _ = progression_renewal("comp", steps, ledger, 11)
+        assert form == "full"
+
+    def test_new_step_is_advance_with_the_delta_named(self):
+        steps = _dell_steps()
+        ledger: dict = {}
+        _, fp, _ = progression_renewal("comp", steps[:-2], ledger, 1)
+        commit_progression(
+            ledger, "comp", fp, [s["name"] for s in steps[:-2]], 1
+        )
+        form, _, new = progression_renewal("comp", steps, ledger, 2)
+        assert form == "advance"
+        assert set(new) == {"Medium 3.5 serving at 256k",
+                            "What is the production serving configuration?"}
+
+    def test_revised_content_without_new_steps_is_full(self):
+        steps = _dell_steps()
+        ledger: dict = {}
+        _, fp, _ = progression_renewal("comp", steps, ledger, 1)
+        commit_progression(ledger, "comp", fp, [s["name"] for s in steps], 1)
+        revised = [dict(s) for s in steps]
+        revised[-2]["description"] = "revised terminus body"
+        form, _, new = progression_renewal("comp", revised, ledger, 2)
+        assert form == "full" and new == []
+
+
+class TestFormatProgression:
+    def test_terminus_is_last_state_step_not_trailing_question(self):
+        lines, delivered = format_progression(
+            "stnamcvdl200", _dell_steps(), ["Mistral Large 2411 serving"]
+        )
+        now = next(ln for ln in lines if ln.startswith("  NOW"))
+        assert "Medium 3.5 serving at 256k" in now
+        assert "Medium 3.5 serving at 256k" in delivered["bodies"]
+
+    def test_frontier_step_renders_as_open_line(self):
+        lines, _ = format_progression("comp", _dell_steps(), ["Mistral Large 2411 serving"])
+        assert any(
+            ln.startswith("  ? open (Question)") for ln in lines
+        )
+
+    def test_stale_step_arrives_tensed_and_before_its_resolution(self):
+        # The standing falsification test (design of record §8): the stale
+        # CNTLM claim appears as a DATED step, temporally before the
+        # resolution — never as an unmodalized present-tense assertion.
+        lines, _ = format_progression(
+            "stnamcvdl200", _dell_steps(),
+            ["XE8640 discovery: sole constraint is stale cntlm credentials"],
+        )
+        text = "\n".join(lines)
+        stale = next(ln for ln in lines if "stale cntlm" in ln)
+        assert "2026-08-03" in stale
+        assert text.index("stale cntlm") < text.index("repointed cntlm")
+        assert text.index("repointed cntlm") < text.index("NOW (2026-08-08)")
+
+    def test_seed_distinct_from_terminus_gets_a_body(self):
+        lines, delivered = format_progression(
+            "comp", _dell_steps(),
+            ["XE8640 discovery: sole constraint is stale cntlm credentials"],
+        )
+        seed_line = next(ln for ln in lines if ln.startswith("  SEED"))
+        assert "jump-box proxy" in seed_line  # the description, not a handle
+        assert len(delivered["bodies"]) == 2
+
+    def test_protected_step_survives_while_middles_fold(self):
+        mk = lambda i: {
+            "name": f"middle step {i:02d}", "type": "Observation",
+            "description": "", "sort_key": f"2026-07-{i + 1:02d}T00:00:00Z",
+            "encounter": "E", "enc_t": "",
+        }
+        steps = [mk(i) for i in range(20)]
+        steps[5]["name"] = "the previously-delivered standalone claim"
+        lines, _ = format_progression(
+            "comp", steps, [steps[-1]["name"]],
+            protected_names={"the previously-delivered standalone claim"},
+        )
+        text = "\n".join(lines)
+        assert "the previously-delivered standalone claim" in text
+        assert "more steps folded" in text
+        assert "middle step 00" in text  # origin survives
+
+    def test_cap_is_respected(self):
+        mk = lambda i: {
+            "name": f"step {i:02d} with a long semantic name " + "x" * 60,
+            "type": "Observation", "description": "d " * 120,
+            "sort_key": f"2026-07-{(i % 28) + 1:02d}T00:00:00Z",
+            "encounter": "E", "enc_t": "",
+        }
+        steps = [mk(i) for i in range(30)]
+        lines, _ = format_progression("comp", steps, [steps[0]["name"]])
+        assert sum(len(ln) + 1 for ln in lines) <= 1200 + 400  # bodies floor
+
+    def test_standing_form_is_one_line(self):
+        lines, delivered = format_progression(
+            "comp", _dell_steps(), ["Mistral Large 2411 serving"],
+            form="standing",
+        )
+        assert len(lines) == 1
+        assert "progression standing" in lines[0]
+        assert "Medium 3.5" in lines[0]  # the terminus is named
+        assert delivered["bodies"] == []
+
+    def test_advance_form_is_terminus_plus_delta(self):
+        lines, delivered = format_progression(
+            "comp", _dell_steps(), ["Mistral Large 2411 serving"],
+            form="advance",
+            new_step_names=["Medium 3.5 serving at 256k"],
+        )
+        text = "\n".join(lines)
+        assert "progression advanced" in lines[0]
+        assert "NOW (2026-08-08)" in text
+        # The old resolved steps do NOT re-render in an advance.
+        assert "repointed cntlm" not in text
+        assert "Medium 3.5 serving at 256k" in delivered["bodies"]
+
+    def test_terminus_grounding_renders_inline(self):
+        lines, _ = format_progression(
+            "comp", _dell_steps(), ["Mistral Large 2411 serving"],
+            grounding=["GROUNDS → A GPU is vacated when the driver finishes teardown"],
+        )
+        assert any("A GPU is vacated" in ln for ln in lines)
+
+
+class TestFormatPayloadProgressions:
+    def _block(self, component="stnamcvdl200"):
+        lines, delivered = format_progression(
+            component, _dell_steps(), ["Mistral Large 2411 serving"]
+        )
+        return {"component": component, "lines": lines,
+                "bodies": delivered["bodies"], "steps": delivered["steps"]}
+
+    def test_progressions_render_before_neighborhood(self):
+        p, delivered = format_payload(
+            seed_terms=["dell"], seed_mode="blended",
+            core_conflicts=[], parked_conflicts=[],
+            neighborhood_nodes=[{"name": "hubless", "type": "Concept",
+                                 "description": "d"}],
+            neighborhood_edges=[], open_threads=[], trajectory=[],
+            progressions=[self._block()],
+        )
+        assert "PROGRESSIONS — what you hold about these" in p
+        assert p.index("PROGRESSIONS") < p.index("NEIGHBORHOOD")
+        assert delivered["progressions"] == ["stnamcvdl200"]
+        assert "Medium 3.5 serving at 256k" in delivered["prog_bodies"]
+
+    def test_blocks_yield_atomically_never_mid_block(self):
+        # A squeezed progression could strand the stale step without its
+        # resolution — blocks are kept whole or dropped whole.
+        blocks = [self._block("comp-a"), self._block("comp-b")]
+        block_chars = sum(len(ln) + 1 for ln in blocks[0]["lines"])
+        p, delivered = format_payload(
+            seed_terms=["dell"], seed_mode="blended",
+            core_conflicts=[], parked_conflicts=[],
+            neighborhood_nodes=[], neighborhood_edges=[],
+            open_threads=[], trajectory=[],
+            progressions=blocks,
+            max_chars=block_chars + 250,  # room for one block, not two
+        )
+        assert delivered["progressions"] == ["comp-a"]
+        assert "comp-b" not in p
+
+    def test_as_of_tense_label_renders(self):
+        p = _payload(neighborhood_nodes=[
+            {"name": "a hubless claim", "type": "Observation",
+             "description": "d", "as_of": "2026-08-03"},
+        ])
+        assert "a hubless claim (Observation) [as of 2026-08-03]" in p
+
+    def test_convergence_annotation_renders(self):
+        p = _payload(neighborhood_nodes=[
+            {"name": "an instance", "type": "Observation", "description": "d",
+             "convergence": 'instantiates "the principle" — one of 5 grounding instances'},
+        ])
+        assert '↳ instantiates "the principle" — one of 5' in p
+
+
+class TestFormatDeltaProgression:
+    def test_recognition_carries_progression_and_terminus(self):
+        p = format_delta(
+            [{"name": "XE8640 discovery", "type": "Observation",
+              "encounters": ["Encounter Aug 3"],
+              "progression": {"component": "stnamcvdl200",
+                              "terminus": "Medium 3.5 serving at 256k"}}],
+            [],
+        )
+        assert "step in progression stnamcvdl200" in p
+        assert "current terminus: Medium 3.5 serving at 256k" in p
+
+    def test_recognition_that_is_the_terminus_says_so(self):
+        p = format_delta(
+            [{"name": "Medium 3.5 serving at 256k", "type": "Observation",
+              "encounters": [],
+              "progression": {"component": "stnamcvdl200",
+                              "terminus": "Medium 3.5 serving at 256k"}}],
+            [],
+        )
+        assert "terminus of progression stnamcvdl200" in p
+        assert "current terminus:" not in p

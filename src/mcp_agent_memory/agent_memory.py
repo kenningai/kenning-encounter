@@ -1,3 +1,4 @@
+import importlib.metadata
 import logging
 import time
 import uuid
@@ -8,11 +9,17 @@ from neo4j import AsyncDriver, RoutingControl
 
 from .infuse import (
     commit_delivery,
+    commit_progression,
+    content_key,
     delta_novelty,
     extract_focal_signals,
     format_delta,
     format_payload,
+    format_progression,
+    group_progressions,
     lucene_query,
+    progression_renewal,
+    progression_terminus,
     renewal_filter_edges,
     renewal_partition,
     triage_conflicts,
@@ -21,6 +28,15 @@ from .utils import load_cypher, lit
 
 logger = logging.getLogger("mcp_agent_memory")
 logger.setLevel(logging.INFO)
+
+# Stamped into every infuse result so the observe log can stratify B1 rows
+# on server version across instrument seams (EXPERIMENT-BARLOW A9: rows
+# before and after the v0.8.0 progression cutover are not comparable
+# row-for-row; the version is the seam marker).
+try:
+    _SERVER_VERSION = importlib.metadata.version("mcp-agent-memory")
+except importlib.metadata.PackageNotFoundError:  # editable/dev fallback
+    _SERVER_VERSION = "unknown"
 
 
 def _neo4j_datetime_to_str(val: Any) -> str | None:
@@ -1585,6 +1601,32 @@ class Neo4jAgentMemory:
                 }
                 for m in strong
             ]
+            # Progression context (v0.8.0, design of record §4): a recognized
+            # node that belongs to a Component progression arrives tensed —
+            # its subject named, the current terminus named. Attached BEFORE
+            # the novelty gate so the context is part of the fingerprint: a
+            # terminus advance is a new fact-state and re-announces; the
+            # fingerprint discipline prevents droning.
+            prog_ctx = await self.driver.execute_query(
+                "MATCH (n)-[:ABOUT]->(comp:Component) WHERE n.name IN $names "
+                "MATCH (sib)-[:ABOUT]->(comp) "
+                "WHERE labels(sib)[0] IN ['Observation', 'Note'] "
+                "WITH n.name AS name, comp.name AS component, sib "
+                "ORDER BY coalesce(sib.t_observed, sib.t_created) DESC "
+                "WITH name, component, collect(sib.name) AS sibs "
+                "WHERE size(sibs) >= 2 "
+                "RETURN name, component, sibs[0] AS terminus",
+                {"names": names},
+                routing_=RoutingControl.READ,
+            )
+            by_name_prog = {
+                r["name"]: {"component": r["component"], "terminus": r["terminus"]}
+                for r in prog_ctx.records
+            }
+            for r in recognitions:
+                prog = by_name_prog.get(r["name"])
+                if prog:
+                    r["progression"] = prog
             conflicts = await self._conflicts_among(names)
 
         suppressed = {"recognitions": 0, "conflicts": 0}
@@ -1604,6 +1646,7 @@ class Neo4jAgentMemory:
         timings["total"] = time.perf_counter() - t0
         return {
             "mode": "delta",
+            "server_version": _SERVER_VERSION,
             "payload": payload,
             "silence": payload == "",
             "seed_terms": seed_terms,
@@ -1686,6 +1729,7 @@ class Neo4jAgentMemory:
             timings["total"] = time.perf_counter() - t0
             return {
                 "mode": "full",
+                "server_version": _SERVER_VERSION,
                 "payload": "",
                 "silence": True,
                 "seed_terms": seed_terms,
@@ -1867,9 +1911,15 @@ class Neo4jAgentMemory:
         )
         by_name = {r["name"]: dict(r) for r in desc_res.records}
         nbhd_nodes = [by_name[n] for n in top_names if n in by_name]
+        # The minimum tense marker (v0.8.0, design of record §1.3): every
+        # delivered body carries its as-of date. A timestamp is knowledge;
+        # a disclaimer is noise.
+        for n in nbhd_nodes:
+            stamp = n.get("t_observed") or n.get("t_created") or ""
+            n["as_of"] = stamp[:10] if stamp else None
 
-        # Renewal: split into fresh bodies and standing handles. Stateless
-        # callers (no locus) get v0.5.x behavior — everything fresh.
+        # Locus state first — the renewal decisions now govern BOTH the
+        # progression assembly and the neighborhood flow.
         standing_nodes: list[dict[str, Any]] = []
         turn = 0
         ledger: dict[str, dict[str, Any]] | None = None
@@ -1878,6 +1928,150 @@ class Neo4jAgentMemory:
             turn = self._locus_turn.get(locus_key, 0) + 1
             self._locus_turn[locus_key] = turn
             ledger = self._ledger_for(locus_key)
+
+        # -- Assembly stage (v0.8.0, the progression reform) ---------------
+        # Selection stays atemporal (what is relevant); delivery becomes
+        # temporal (in what order did this become what it is). Two-hop
+        # fan-out via Component hubs: the ABOUT->Component star the
+        # reference layer mandates IS the topical-progression index. The
+        # primary order is noticing-time; the secondary key is the anchoring
+        # encounter's t_exist — the serialized server's creation order, a
+        # structural tiebreak, not a wall-clock reconstruction (§6).
+        t_asm = time.perf_counter()
+        prog_rows_res = await self.driver.execute_query(
+            "MATCH (sel)-[:ABOUT]->(comp:Component) WHERE sel.name IN $names "
+            "MATCH (sib)-[:ABOUT]->(comp) "
+            "OPTIONAL MATCH (enc:Encounter)-[:RECORDED]->(sib) "
+            "WITH comp, sib, enc, "
+            "     coalesce(sib.t_observed, sib.t_raised, sib.t_proposed, "
+            "              sib.t_created) AS sk "
+            "RETURN comp.name AS component, sib.name AS name, "
+            "       labels(sib)[0] AS type, sib.description AS description, "
+            "       toString(sk) AS sort_key, enc.name AS encounter, "
+            "       toString(enc.t_exist) AS enc_t "
+            "ORDER BY component ASC, sort_key ASC, enc_t ASC LIMIT 400",
+            {"names": top_names},
+            routing_=RoutingControl.READ,
+        )
+        prog_rows = [dict(r) for r in prog_rows_res.records]
+        prog_groups = group_progressions(prog_rows, top_names)[:4]
+
+        # Terminus grounding (§2.3): the terminus carries its evidence
+        # edges inline — a terminus without them is merely the latest claim.
+        termini = [
+            t["name"] for g in prog_groups
+            if (t := progression_terminus(g["steps"])) is not None
+        ]
+        grounding_map: dict[str, list[str]] = {}
+        if termini:
+            g_res = await self.driver.execute_query(
+                "MATCH (t)-[r:GROUNDS|SUPPORTS]->(x) WHERE t.name IN $names "
+                "RETURN t.name AS name, type(r) AS rel, x.name AS target "
+                "LIMIT 40",
+                {"names": termini},
+                routing_=RoutingControl.READ,
+            )
+            for r in g_res.records:
+                grounding_map.setdefault(r["name"], []).append(
+                    f"{r['rel']} → {r['target']}"
+                )
+
+        # Previously-delivered-standalone steps must never fold — the
+        # implementable form of the crossing-out-pair rule: a claim this
+        # locus has seen as a standalone body arrives tensed, always.
+        protected = (
+            {k for k in ledger if not k.startswith(("edge|", "prog|"))}
+            if ledger is not None
+            else set()
+        )
+        prog_renders: list[dict[str, Any]] = []
+        prog_meta: list[dict[str, Any]] = []
+        prog_fps: dict[str, tuple[str, list[str]]] = {}
+        member_names: set[str] = set()
+        threads_in_topic: set[str] = set()
+        for g in prog_groups:
+            form, fp, new_steps = progression_renewal(
+                g["component"], g["steps"], ledger if ledger is not None else {},
+                turn, refresh_turns=refresh_turns,
+            )
+            terminus = progression_terminus(g["steps"])
+            lines, pdelivered = format_progression(
+                g["component"], g["steps"], g["seed_names"],
+                protected_names=protected, form=form,
+                new_step_names=new_steps,
+                grounding=(
+                    grounding_map.get(terminus["name"]) if terminus else None
+                ),
+            )
+            prog_renders.append({
+                "component": g["component"], "lines": lines,
+                "bodies": pdelivered["bodies"], "steps": pdelivered["steps"],
+            })
+            prog_fps[g["component"]] = (fp, [s["name"] for s in g["steps"]])
+            member_names |= {s["name"] for s in g["steps"]}
+            if form in ("full", "advance"):
+                threads_in_topic |= {
+                    s["name"] for s in g["steps"]
+                    if s.get("type") in ("Question", "Hypothesis")
+                }
+            prog_meta.append({
+                "component": g["component"], "form": form,
+                "steps": len(g["steps"]), "new_steps": new_steps,
+                "seed_names": g["seed_names"],
+            })
+
+        # A progression member never flows through the standalone path — in
+        # ANY form. This is the structural fix for the renewal-economy
+        # re-amplification defect: a superseded claim can only re-enter as
+        # a step in its progression, which is already tensed.
+        if member_names:
+            nbhd_nodes = [
+                n for n in nbhd_nodes if n["name"] not in member_names
+            ]
+
+        # Blind-spot log (§1.5): selected Observations with no Component
+        # hub cannot be assembled — the working list for the bookmark
+        # discipline, surfaced by the instrument rather than hoped for.
+        with_hub = {r["name"] for r in prog_rows}
+        unassembled = [
+            r["node"] for r in top
+            if r.get("type") == "Observation" and r["node"] not in with_hub
+        ]
+
+        # Convergence annotation (§1.2), hard-capped: hubless Observations
+        # that ground a Concept carry the principle and its instance count
+        # in one line — never the instance bodies (mass amplification).
+        hubless_obs = [
+            n["name"] for n in nbhd_nodes if n.get("type") == "Observation"
+        ]
+        if hubless_obs:
+            conv_res = await self.driver.execute_query(
+                "MATCH (o:Observation)-[:GROUNDS]->(c:Concept) "
+                "WHERE o.name IN $names "
+                "WITH o.name AS name, c, "
+                "     COUNT { (:Observation)-[:GROUNDS]->(c) } AS total "
+                "ORDER BY total DESC "
+                "WITH name, collect({concept: c.name, total: total})[0] AS top "
+                "RETURN name, top.concept AS concept, top.total AS total",
+                {"names": hubless_obs},
+                routing_=RoutingControl.READ,
+            )
+            for r in conv_res.records:
+                if r["total"] and r["total"] >= 2 and r["name"] in by_name:
+                    node = next(
+                        (n for n in nbhd_nodes if n["name"] == r["name"]), None
+                    )
+                    if node is not None:
+                        node["convergence"] = (
+                            f'instantiates "{r["concept"]}" — one of '
+                            f"{r['total']} grounding instances"
+                        )
+        timings["assembly"] = time.perf_counter() - t_asm
+
+        # Renewal: split the REMAINING (hubless) nodes into fresh bodies and
+        # standing handles. Stateless callers (no locus) get v0.5.x
+        # behavior — everything fresh.
+        if ledger is not None:
             nbhd_nodes, standing_nodes, fingerprints = renewal_partition(
                 nbhd_nodes, ledger, turn, refresh_turns=refresh_turns
             )
@@ -1899,8 +2093,17 @@ class Neo4jAgentMemory:
             for r in frontier["contested_hypotheses"]
             if r["name"] in top_set
         ]
+        # A thread rendered inside a delivered progression block is the
+        # frontier's voice arriving in-topic — it need not repeat in the
+        # register. Cross-topic threads keep their own voice (§2.4).
+        open_threads = [
+            t for t in open_threads if t["name"] not in threads_in_topic
+        ]
 
-        trajectory = await self._anchors_for(top_names)
+        # Trajectory now covers only nodes NOT delivered as progressions —
+        # for progression members, the ordering IS the delivery.
+        traj_names = [n for n in top_names if n not in member_names]
+        trajectory = await self._anchors_for(traj_names)
         timings["assemble"] = time.perf_counter() - t5
 
         payload, delivered = format_payload(
@@ -1914,6 +2117,7 @@ class Neo4jAgentMemory:
             trajectory=trajectory,
             max_chars=max_chars,
             standing_nodes=standing_nodes,
+            progressions=prog_renders,
         )
 
         # Delivery-gated ledger stamp (v0.7.1). Only bodies that actually
@@ -1921,8 +2125,32 @@ class Neo4jAgentMemory:
         # body keeps its previous last_full and re-delivers next turn.
         # Stamping from selection produced 31 phantom delivery records in a
         # 7-turn session and would have handed B1 a corrupted x-axis.
+        # v0.8.0: assembly accounting — assembled siblings were never
+        # selected but ARE delivered; they stamp too, or the phantom-
+        # delivery shear returns in mirror image. Three sets, all tracked:
+        # selected, assembled, delivered.
         if ledger is not None:
-            commit_delivery(ledger, fingerprints, delivered["bodies"], turn)
+            step_lookup = {
+                s["name"]: s for g in prog_groups for s in g["steps"]
+            }
+            prog_body_fps = {
+                name: content_key(
+                    "node",
+                    {"name": s["name"], "type": s.get("type"),
+                     "description": s.get("description")},
+                )
+                for name in delivered.get("prog_bodies", [])
+                if (s := step_lookup.get(name)) is not None
+            }
+            commit_delivery(
+                ledger,
+                {**fingerprints, **prog_body_fps},
+                delivered["bodies"] + delivered.get("prog_bodies", []),
+                turn,
+            )
+            for comp in delivered.get("progressions", []):
+                fp, all_step_names = prog_fps[comp]
+                commit_progression(ledger, comp, fp, all_step_names, turn)
 
         # B2b provenance (EXPERIMENT-BARLOW): the pre-committed
         # focal-dominance check needs to know which delivered bodies arrived
@@ -1944,6 +2172,7 @@ class Neo4jAgentMemory:
         timings["total"] = time.perf_counter() - t0
         return {
             "mode": "full",
+            "server_version": _SERVER_VERSION,
             "payload": payload,
             "silence": payload == "",
             "seed_terms": seed_terms,
@@ -1955,6 +2184,17 @@ class Neo4jAgentMemory:
             "expansion_seeds": expansion_seeds,
             "expansion_bias": expansion_bias,
             "turn": turn,
+            # Assembly accounting (v0.8.0): the progression reform's three
+            # sets — selected (ranked), assembled (fan-out siblings),
+            # delivered (what reached the payload) — plus the blind-spot
+            # log, the working list for the bookmark discipline.
+            "assembly": {
+                "progressions": prog_meta,
+                "delivered_progressions": delivered.get("progressions", []),
+                "prog_bodies": delivered.get("prog_bodies", []),
+                "prog_steps": delivered.get("prog_steps", []),
+                "unassembled": unassembled,
+            },
             "renewal": {
                 # SELECTED — what the partition chose this turn.
                 "fresh": [n["name"] for n in nbhd_nodes],
@@ -2005,6 +2245,11 @@ class Neo4jAgentMemory:
                 "core_conflicts": len(core),
                 "parked_conflicts": len(parked),
                 "open_threads": len(open_threads),
+                "progressions": len(prog_renders),
+                "delivered_progressions": len(
+                    delivered.get("progressions", [])
+                ),
+                "unassembled": len(unassembled),
             },
             "timings_ms": {k: round(v * 1000, 1) for k, v in timings.items()},
         }

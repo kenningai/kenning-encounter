@@ -388,6 +388,305 @@ def delta_novelty(
     return fresh_r, fresh_c, new_keys
 
 
+# -- Progression assembly (v0.8.0, the progression reform) --------------------------
+
+# The knowledge-vs-data repair (design of record, 2026-08-11): data means
+# nothing until connected in time to other data, and an LLM handed two
+# contradictory observations about one subject WITHOUT their temporal ordering
+# must fabricate the connection — confabulation as the necessary consequence
+# of tenseless delivery, not a handling defect. Selection stays atemporal (it
+# answers "what is relevant"); DELIVERY becomes temporal (it answers "in what
+# order did this become what it is"). The graph already holds the manifold:
+# every multi-observation Component is a temporal progression assemblable by
+# a two-hop fan-out (obs -> ABOUT -> Component -> siblings, with RECORDED
+# provenance). The server surfaces the ordering; the agent performs the
+# crossing-out. Nothing here writes: the graph stays pure WAS.
+
+_PROG_CAP_CHARS = 1200          # per-progression budget (design of record §2.2)
+_PROG_MAX_BODIES = 2            # terminus + seed when distinct
+_PROG_STEP_SNIP = 90
+_PROG_TERMINUS_SNIP = 300
+# Types that carry state. Questions/Hypotheses in a progression are the
+# frontier's voice arriving in-topic — rendered, but never the terminus:
+# an open question noticed last is not the subject's current state.
+_PROG_STATE_TYPES = frozenset({"Observation", "Note"})
+
+
+def _date_of(step: dict[str, Any]) -> str:
+    key = step.get("sort_key") or ""
+    return str(key)[:10] if key else "undated"
+
+
+def group_progressions(
+    rows: list[dict[str, Any]],
+    selected_names: list[str],
+    min_steps: int = 2,
+) -> list[dict[str, Any]]:
+    """Group two-hop fan-out rows into per-Component progressions.
+
+    rows: {component, name, type, description, sort_key, encounter, enc_t} —
+    already sorted by (component, sort_key, enc_t) by the query. The primary
+    order is noticing-time (coalesce of t_observed/t_raised/t_proposed/
+    t_created); the secondary key is the anchoring encounter's t_exist, which
+    is legitimate as a STRUCTURAL tiebreak because every encounter is created
+    by one serialized server transaction — its order is the creation order of
+    the spine made scalar, not a wall-clock reconstruction (design of record
+    §6; applies post-v0.3.0-seam, and pre-seam steps simply keep noticing-time
+    order, which is all the un-rethreaded braid supports).
+
+    Dedup is by Component, not by seed: two selected observations about one
+    Component assemble ONE progression. A single-step "progression" is just
+    the node — filtered out (min_steps), it flows through the neighborhood
+    path instead. Returns [{"component", "steps", "seed_names"}], most
+    selected members first (most-relevant topic leads).
+    """
+    by_comp: dict[str, dict[str, dict[str, Any]]] = {}
+    for r in rows:
+        comp = r.get("component")
+        name = r.get("name")
+        if not comp or not name:
+            continue
+        by_comp.setdefault(comp, {})
+        # First occurrence wins; rows arrive pre-sorted so this keeps order.
+        by_comp[comp].setdefault(name, r)
+    selected = set(selected_names)
+    out: list[dict[str, Any]] = []
+    for comp, steps_by_name in by_comp.items():
+        steps = list(steps_by_name.values())
+        steps.sort(key=lambda s: (str(s.get("sort_key") or ""), str(s.get("enc_t") or "")))
+        if len(steps) < min_steps:
+            continue
+        seed_names = [s["name"] for s in steps if s["name"] in selected]
+        if not seed_names:
+            continue
+        out.append({"component": comp, "steps": steps, "seed_names": seed_names})
+    out.sort(key=lambda p: len(p["seed_names"]), reverse=True)
+    return out
+
+
+def progression_terminus(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The last STATE step — the subject's current constituted state."""
+    for s in reversed(steps):
+        if s.get("type") in _PROG_STATE_TYPES:
+            return s
+    return None
+
+
+def progression_renewal(
+    component: str,
+    steps: list[dict[str, Any]],
+    ledger: dict[str, dict[str, Any]],
+    turn: int,
+    refresh_turns: int = _RENEWAL_REFRESH_TURNS,
+) -> tuple[str, str, list[str]]:
+    """The progression as the unit of renewal (design of record §3).
+
+    Returns (form, fp, new_step_names). Forms: "full" (first sight, or stale),
+    "standing" (unchanged and fresh — one line re-pins the whole topic),
+    "advance" (a new step arrived — terminus plus delta, the
+    announce-on-state-change semantics inherited from the delta gate).
+    STRICTLY PURE: the ledger is read, never written — selection is not
+    delivery (v0.7.1); callers stamp via `commit_progression` with what the
+    payload actually carried.
+    """
+    terminus = progression_terminus(steps)
+    fp = content_key(
+        "prog",
+        {
+            "component": component,
+            "steps": [s["name"] for s in steps],
+            "terminus": (terminus or {}).get("description"),
+        },
+    )
+    entry = ledger.get(f"prog|{component}")
+    if entry is None:
+        return "full", fp, []
+    if entry.get("fp") == fp:
+        if (turn - entry.get("last_full", 0)) < refresh_turns:
+            return "standing", fp, []
+        return "full", fp, []
+    known = set(entry.get("steps") or ())
+    new = [s["name"] for s in steps if s["name"] not in known]
+    if not new:
+        # Content changed without new steps (a step's body was revised, or
+        # the terminus description shifted) — a new first sight of the new
+        # state; the full form re-delivers it.
+        return "full", fp, []
+    return "advance", fp, new
+
+
+def commit_progression(
+    ledger: dict[str, dict[str, Any]],
+    component: str,
+    fp: str,
+    step_names: list[str],
+    turn: int,
+) -> None:
+    """Stamp a progression that ACTUALLY reached the payload."""
+    ledger[f"prog|{component}"] = {
+        "fp": fp,
+        "last_full": turn,
+        "steps": list(step_names),
+    }
+
+
+def format_progression(
+    component: str,
+    steps: list[dict[str, Any]],
+    seed_names: list[str],
+    protected_names: set[str] | None = None,
+    form: str = "full",
+    new_step_names: list[str] | None = None,
+    grounding: list[str] | None = None,
+    cap_chars: int = _PROG_CAP_CHARS,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Render one topic block. Returns (lines, delivered) with delivered =
+    {"bodies": [...], "steps": [...]}.
+
+    The block is ATOMIC — the payload assembler keeps or drops it whole. A
+    progression squeezed mid-block could deliver the stale step and cut its
+    resolution below it, asserting the very superposition this form exists
+    to prevent.
+
+    Role-first survival within the cap (design of record §2.2): terminus
+    (currency, full body with grounding), seed step (independently ranked,
+    full body when distinct), protected steps (previously delivered
+    standalone — the implementable form of the crossing-out-pair rule: a
+    step the bound locus has seen as a standalone claim must arrive tensed,
+    never fold), origin (stories need beginnings), recent intermediates,
+    then middles folded into a count line. Steps render in temporal order;
+    only the SELECTION of survivors is role-first.
+    """
+    protected = protected_names or set()
+    delivered: dict[str, list[str]] = {"bodies": [], "steps": []}
+    terminus = progression_terminus(steps)
+
+    if form == "standing":
+        t_name = _snip((terminus or {}).get("name"), 70) if terminus else "?"
+        line = (
+            f"  ◦ {component} — progression standing "
+            f"({len(steps)} steps; terminus: {t_name})"
+        )
+        delivered["steps"] = [s["name"] for s in steps]
+        return [line], delivered
+
+    state_steps = [s for s in steps if s.get("type") in _PROG_STATE_TYPES]
+    frontier_steps = [s for s in steps if s.get("type") not in _PROG_STATE_TYPES]
+    new_names = set(new_step_names or ())
+
+    # Body roles: terminus always; seed when distinct (last seed that isn't
+    # the terminus — it earned independent relevance from the rank).
+    body_names: list[str] = []
+    if terminus is not None:
+        body_names.append(terminus["name"])
+    seed_bodies = [
+        n for n in reversed(seed_names)
+        if terminus is None or n != terminus["name"]
+    ]
+    if seed_bodies and len(body_names) < _PROG_MAX_BODIES:
+        body_names.append(seed_bodies[0])
+
+    candidates = [s for s in state_steps if s["name"] not in body_names]
+    seed_set = set(seed_names)
+
+    if form == "advance":
+        header = (
+            f"{component} — progression advanced (+{len(new_names)} step"
+            f"{'s' if len(new_names) != 1 else ''}):"
+        )
+        keep = {
+            s["name"] for s in candidates
+            if s["name"] in new_names
+        }
+        optional: list[str] = []
+    else:
+        header = (
+            f"{component} — {len(steps)} steps, "
+            f"{_date_of(steps[0])} → {_date_of(steps[-1])}:"
+        )
+        # Role-first survivor floor: origin, protected (previously delivered
+        # standalone — must arrive tensed, never fold), and seeds. Recent
+        # intermediates are the optional fill, oldest yielding first under
+        # the cap. Render order stays temporal; only SELECTION is role-first.
+        keep = set()
+        if candidates:
+            keep.add(candidates[0]["name"])  # origin
+        for s in candidates:
+            if s["name"] in protected or s["name"] in seed_set:
+                keep.add(s["name"])
+        optional = [
+            s["name"] for s in reversed(candidates)
+            if s["name"] not in keep
+        ][:6]  # recent-first fill; the cap walk below trims from the tail
+        keep |= set(optional)
+
+    def _render(keep_now: set[str]) -> tuple[list[str], dict[str, list[str]]]:
+        """One full render for a given survivor set. Every step renders IN
+        ITS TEMPORAL PLACE — bodies included: a body hoisted out of sequence
+        would put a stale claim after its resolution, and the ordering IS
+        the knowledge. The fold line carries the TRUE folded count for
+        exactly this render — the block never lies about what folded."""
+        out: list[str] = [header]
+        dlv: dict[str, list[str]] = {"bodies": [], "steps": []}
+        folded_now = sum(
+            1 for s in candidates if s["name"] not in keep_now
+        )
+        fold_line = (
+            f"  → … {folded_now} more steps folded" if folded_now > 0 else None
+        )
+        emitted_fold = False
+        for s in state_steps:
+            name = s["name"]
+            if terminus is not None and name == terminus["name"]:
+                continue  # the terminus renders last, as NOW
+            if name in body_names:
+                desc = _snip(s.get("description"), _PROG_TERMINUS_SNIP)
+                suffix = f" — {desc}" if desc else ""
+                out.append(f"  SEED ({_date_of(s)}): {name}{suffix}")
+                dlv["bodies"].append(name)
+                dlv["steps"].append(name)
+                continue
+            if name in keep_now:
+                marker = " [seed]" if name in seed_set else ""
+                note = " (Note)" if s.get("type") == "Note" else ""
+                out.append(
+                    f"  → {_date_of(s)}: {_snip(name, _PROG_STEP_SNIP)}{note}{marker}"
+                )
+                dlv["steps"].append(name)
+            elif fold_line is not None and not emitted_fold:
+                out.append(fold_line)
+                emitted_fold = True
+        if terminus is not None:
+            desc = _snip(terminus.get("description"), _PROG_TERMINUS_SNIP)
+            suffix = f" — {desc}" if desc else ""
+            out.append(f"  NOW ({_date_of(terminus)}): {terminus['name']}{suffix}")
+            if grounding:
+                out.append(f"      [{'; '.join(grounding[:2])}]")
+            dlv["bodies"].append(terminus["name"])
+            dlv["steps"].append(terminus["name"])
+        for s in frontier_steps:
+            out.append(
+                f"  ? open ({s.get('type', '?')}): {_snip(s['name'], _PROG_STEP_SNIP)}"
+            )
+            dlv["steps"].append(s["name"])
+        return out, dlv
+
+    def _total(ls: list[str]) -> int:
+        return sum(len(x) + 1 for x in ls)
+
+    # Iterative cap walk: the optional fill yields oldest-first (middles
+    # fold, recency survives), the fold count stays true on every pass, and
+    # the floor — origin, protected, seeds, bodies, frontier — never yields
+    # to the cap. The floor plus two bodies is the block's honest minimum.
+    lines, delivered = _render(keep)
+    yieldable = [n for n in optional]  # recent-first; pop() yields oldest
+    while _total(lines) > cap_chars and yieldable:
+        keep.discard(yieldable.pop())
+        lines, delivered = _render(keep)
+
+    return lines, delivered
+
+
 # -- Format -----------------------------------------------------------------------
 
 _MAX_PAYLOAD_CHARS = 10_000
@@ -425,6 +724,7 @@ def format_payload(
     trajectory: list[dict[str, Any]],
     max_chars: int = _MAX_PAYLOAD_CHARS,
     standing_nodes: list[dict[str, Any]] | None = None,
+    progressions: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, list[str]]]:
     """Assemble the signed governed payload, coherence tension first.
 
@@ -435,16 +735,24 @@ def format_payload(
 
     Order is the governance: signature (a proposal from the sediment, not a
     conclusion), then whatever contests the focal understanding, then the
-    gravitational neighborhood (FRESH bodies only under the renewal
-    ledger), then the standing handles (delivered earlier, re-pinned at one
-    line each), then the open threads the frontier bias pulled into range,
-    then the temporal trajectory, and last the parked tensions — carried at
-    one line each. Budgeting protects the ends: the signature, core
-    tension, and parked register are laid down first and NEVER yield. The
-    middle degrades in a deliberate order distinct from its display order:
-    trajectory yields first, standing handles second, neighborhood third,
-    open threads last — the frontier's voice is the governance mechanism
-    and survives the squeeze.
+    PROGRESSIONS (v0.8.0 — topic blocks of knowledge connected in time,
+    pre-rendered by `format_progression` and kept or dropped ATOMICALLY: a
+    mid-block cut could strand a stale step without its resolution), then
+    the gravitational neighborhood (FRESH bodies only under the renewal
+    ledger, each tensed with its as-of date), then the standing handles
+    (delivered earlier, re-pinned at one line each), then the open threads
+    the frontier bias pulled into range, then the temporal trajectory, and
+    last the parked tensions — carried at one line each. Budgeting protects
+    the ends: the signature, core tension, and parked register are laid down
+    first and NEVER yield. The middle degrades in a deliberate order
+    distinct from its display order: trajectory yields first, standing
+    handles second, neighborhood third, progressions fourth, open threads
+    last — the frontier's voice is the governance mechanism and the
+    progressions are the knowledge delivery; both survive the squeeze
+    longest.
+
+    `progressions` rows: {"component", "lines", "bodies", "steps"} from
+    `format_progression`.
     """
     header = (
         f"[substrate proposal — awakened from: {', '.join(seed_terms) or '(frontier only)'}"
@@ -474,6 +782,8 @@ def format_payload(
     # the budget squeeze, rather than what it was handed. The ledger and
     # the observe log are both stamped from that report — see
     # `commit_delivery`.
+    prog_blocks: list[dict[str, Any]] = list(progressions or [])
+
     nbhd_lines: list[str] = []
     nbhd_names: list[str | None] = []
     if neighborhood_nodes:
@@ -482,8 +792,20 @@ def format_payload(
         for n in neighborhood_nodes:
             desc = _snip(n.get("description"))
             suffix = f" — {desc}" if desc else ""
-            nbhd_lines.append(f"  • {n['name']} ({n['type']}){suffix}")
+            # The minimum tense marker (design of record §1.3): every body
+            # carries its as-of date, so no claim arrives as an unmodalized
+            # present-tense assertion. A timestamp is knowledge; a
+            # disclaimer would be noise.
+            as_of = n.get("as_of")
+            tense = f" [as of {as_of}]" if as_of else ""
+            nbhd_lines.append(f"  • {n['name']} ({n['type']}){tense}{suffix}")
             nbhd_names.append(n["name"])
+            conv = n.get("convergence")
+            if conv:
+                # Convergence annotation (§1.2), hard-capped to one line —
+                # uncapped convergence is the gravity well given a megaphone.
+                nbhd_lines.append(f"    ↳ {conv}")
+                nbhd_names.append(None)
         for e in neighborhood_edges:
             nbhd_lines.append(f"    {e['from_name']} {e['rel']} {e['to_name']}")
             nbhd_names.append(None)
@@ -537,10 +859,34 @@ def format_payload(
         "traj": traj_lines,
     }
     kept: dict[str, list[str]] = {k: [] for k in sections}
+    kept_prog: list[dict[str, Any]] = []
+    prog_banner = "PROGRESSIONS — what you hold about these, connected in time:"
     exhausted = False
-    for key in ("threads", "standing", "nbhd", "traj"):
+    for key in ("threads", "prog", "standing", "nbhd", "traj"):
         if exhausted:
             break
+        if key == "prog":
+            # Atomic blocks: a progression is kept whole or dropped whole —
+            # a mid-block cut could deliver the stale step and cut its
+            # resolution, asserting the superposition this form prevents.
+            if prog_blocks:
+                banner_cost = len(prog_banner) + 1
+                if budget - banner_cost < 0:
+                    exhausted = True
+                    continue
+                budget -= banner_cost
+                any_kept = False
+                for block in prog_blocks:
+                    cost = sum(len(x) + 1 for x in block["lines"])
+                    if budget - cost < 0:
+                        exhausted = True
+                        break
+                    kept_prog.append(block)
+                    budget -= cost
+                    any_kept = True
+                if not any_kept:
+                    budget += banner_cost
+            continue
         for line in sections[key]:
             cost = len(line) + 1
             if budget - cost < 0:
@@ -555,13 +901,23 @@ def format_payload(
             # A bare section header with no content is noise; reclaim it.
             budget += len(kept[key][0]) + 1
             kept[key] = []
-    middle = kept["nbhd"] + kept["standing"] + kept["threads"] + kept["traj"]
+    prog_lines: list[str] = (
+        [prog_banner] + [ln for b in kept_prog for ln in b["lines"]]
+        if kept_prog
+        else []
+    )
+    middle = (
+        prog_lines + kept["nbhd"] + kept["standing"] + kept["threads"] + kept["traj"]
+    )
 
     # What actually survived the squeeze — the only honest basis for
     # stamping the ledger and the observe log.
     delivered = {
         "bodies": [n for n in nbhd_names[: len(kept["nbhd"])] if n],
         "handles": [n for n in standing_names[: len(kept["standing"])] if n],
+        "progressions": [b["component"] for b in kept_prog],
+        "prog_bodies": [n for b in kept_prog for n in b.get("bodies", [])],
+        "prog_steps": [n for b in kept_prog for n in b.get("steps", [])],
     }
 
     payload = "\n".join(fixed + middle + parked_lines)
@@ -592,7 +948,10 @@ def format_payload(
         if len(payload) > max_chars:
             payload = payload[: max_chars - 1] + "…"
         # The middle is gone entirely in this branch; nothing was delivered.
-        delivered = {"bodies": [], "handles": []}
+        delivered = {
+            "bodies": [], "handles": [],
+            "progressions": [], "prog_bodies": [], "prog_steps": [],
+        }
     return payload, delivered
 
 
@@ -617,7 +976,22 @@ def format_delta(
     for r in recognitions:
         encounters = ", ".join(r.get("encounters", []))
         suffix = f" (constituted in: {encounters})" if encounters else ""
-        lines.append(f"  • already held: {r['name']} ({r['type']}){suffix}")
+        # Progression context (v0.8.0, design of record §4): a recognition
+        # arrives tensed — as a step in its subject's progression with the
+        # current terminus named, or as the terminus itself. The context is
+        # part of the row's content fingerprint, so a terminus advance is a
+        # new fact-state and re-announces; a verbatim repeat stays suppressed.
+        prog = r.get("progression")
+        prog_note = ""
+        if prog:
+            if prog.get("terminus") == r["name"]:
+                prog_note = f" — terminus of progression {prog['component']}"
+            else:
+                prog_note = (
+                    f" — step in progression {prog['component']}; "
+                    f"current terminus: {_snip(prog.get('terminus'), 90)}"
+                )
+        lines.append(f"  • already held: {r['name']} ({r['type']}){prog_note}{suffix}")
     for c in core_conflicts:
         lines.append(f"  • CONTESTS what you hold: {_conflict_line(c)}")
     payload = "\n".join(lines)

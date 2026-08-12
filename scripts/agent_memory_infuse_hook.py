@@ -202,7 +202,7 @@ def _initialize(url: str) -> str | None:
             "params": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "agent_memory-infuse-hook", "version": "0.5.0"},
+                "clientInfo": {"name": "agent_memory-infuse-hook", "version": "0.8.0"},
             },
         },
         None,
@@ -349,6 +349,12 @@ def main() -> int:
         "counts": result.get("counts"),
         "suppressed": result.get("suppressed"),
         "renewal": result.get("renewal"),
+        # v0.8.0 (EXPERIMENT-BARLOW A9): the assembly accounting — selected /
+        # assembled / delivered plus the blind-spot log — and the server
+        # version, the seam marker B1 stratifies on across the progression
+        # cutover. Absent on pre-0.8.0 servers; .get keeps old servers clean.
+        "assembly": result.get("assembly"),
+        "server_version": result.get("server_version"),
         "timings_ms": result.get("timings_ms"),
         "payload_chars": len(payload),
         "payload": payload,

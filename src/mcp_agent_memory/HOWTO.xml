@@ -129,6 +129,35 @@
     queryable but never seed the frontier, in orient or in infusion. The
     infuse channel surfaces; it never authors — the write pathway stays
     separate, authored, and yours.
+
+    Since v0.6.0 the payload delivers KNOWLEDGE, not disconnected records:
+    an observation whose subject is a bookmarked Component arrives as a
+    step in that Component's PROGRESSION — the subject's records ordered
+    in time, a stale claim dated and placed before its resolution, the
+    terminus (the current state) carrying its grounding edges. The
+    ordering does the work two contradictory records would otherwise
+    force onto you: claims that both cannot be true at the same time in
+    the same sense arrive as a succession, not a superposition, so there
+    is no connection left to invent. A "progression standing" line means
+    the whole story was delivered earlier this session and nothing has
+    changed. Read a progression's terminus as where-here-is, its steps as
+    how-here-was-reached — and read an [as of DATE] tag on any standalone
+    record as exactly that: a dated observation, not a claim about now.
+  </principle>
+
+  <principle name="bookmark-what-you-will-notice-again">
+    The progression form's coverage is bounded by YOUR bookmark
+    discipline, forever. The pipeline can only connect observations in
+    time through a shared Component hub — an unbookmarked subject whose
+    state changes (a server, a repo, a deployment, a pipeline) leaves its
+    observations as isolated standalone claims with succession risk and
+    no hub to assemble by. So: BOOKMARK ANYTHING WHOSE STATE YOU WILL
+    NOTICE AGAIN, at the first noticing, and hang every later noticing on
+    it with ABOUT. The infuse result's assembly.unassembled list is the
+    pipeline surfacing its own coverage gaps — treat every name on it as
+    a candidate for a missing bookmark. One noticing about a subject is a
+    fact; two noticings are a progression, but only if the graph can see
+    they share a subject.
   </principle>
 </purpose>
 
