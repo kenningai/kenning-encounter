@@ -89,16 +89,44 @@ makes salient gets written about, gains weight, and dominates the next
 payload. An agent bound to that loop doesn't get more knowledgeable, it gets
 more repetitive.
 
-The pipeline: **Extract** focal signals from the prompt (terms, identifiers,
-CIDRs, hostnames) → **Match** candidates via the fulltext index → **Rank**
+Since v0.7.0, **selection reads meaning, not keywords**. A self-authored
+graph defeats lexical retrieval by construction: its node names are
+syntheses, deliberately written *above* the vocabulary of the moments that
+need them, so the memory that matters most — the one that bears as an
+unnamed constraint — shares no words with the prompt. We measured three
+retrieval designs to failure on exactly this (lexical matching, frozen
+embeddings, query rewriting) before shipping the one that passed: **the
+meaning matcher**. Offline, one model compresses every node's name and
+description into a one-sentence meaning (the *sidecar* — a derived file
+inside the stack's own volume, never node properties); per prompt, the
+*same model* reads all compressed meanings plus the session **trajectory**
+(the last N user turns, parsed host-side by the hook) and selects the nodes
+that bear on the current moment. Measured on held-out decision-point cases
+with pre-named targets: recall 7/8 against a 2/8 lexical baseline, with the
+trajectory alone contributing two cases no single-prompt method reached.
+
+The selections seed the governed pipeline, which is unchanged: **Rank**
 with a single biased personalized rank over an *ephemeral, coherence-only
 projection* — focal seeds at full weight, the open frontier (unanswered
 questions, live hypotheses) at a minority bias so unresolved work keeps a
 voice — checked against unbiased mass so genuine tension leads → **Format**
 a signed, budgeted payload: load-bearing conflicts first at full amplitude,
 peripheral ones parked in a brief register, neighborhood after. The payload
-is signed with the seed terms it awoke from, so the agent can see *why* this
-surfaced and keep its own judgment over it.
+is signed, so the agent can see *why* this surfaced and keep its own
+judgment over it. On any matcher failure — no API key, timeout, malformed
+output — selection falls back to the original lexical Extract → Match path
+and the result says so; the matcher can never block a turn.
+
+The matcher requires a **Gemini API key** (`GEMINI_API_KEY` in `.env`) and
+defaults to `gemini-3.5-flash-lite`. The model, the 5-second timeout, and
+the reasons-off default are all *measured* choices, not preferences — the
+constraints were built through extensive experimentation (documented in the
+release notes), and the slow tail of the latency distribution is exactly
+the arc-dependent selections that justify the mechanism. The endpoint and
+model are configurable; deviate from the measured configuration at your own
+risk. The sidecar **maintains itself**: nodes are meaning-made on creation,
+a startup reconcile sweep rebuilds any gap from the graph (including first
+boot), and deletions drop entries — there is no maintenance step.
 
 Three disciplines keep the channel honest:
 
@@ -172,12 +200,17 @@ uv run mcp-agent-memory --db-url bolt://localhost:7687
 
 ```bash
 cp .env.example .env        # set a strong NEO4J_AGENT_MEMORY_PASSWORD
+                            # and GEMINI_API_KEY for the meaning matcher
 docker compose up --build   # streamable-http on :8003
 ```
 
 Neo4j Community with APOC + Graph Data Science auto-installed; a query-level
 healthcheck gates startup so the server never races an unready database; Community
 allows one user database, so the stack names it via `initial.dbms.default_database`.
+The meaning sidecar lives inside the stack (the `sidecar_data` named volume,
+like `neo4j_data`) and builds itself from the graph on first boot — nothing
+to run, nothing on the host to lose. Without `GEMINI_API_KEY`, selection
+runs on the lexical fallback path and reports it.
 
 ## Configuration
 
@@ -192,6 +225,15 @@ re-delivered), and per-call `expansion_bias` (`0` disables cluster
 expansion). Per node, `frontier_mute: true` (on `Question` / `Hypothesis` /
 `Concept`) retires a resolved line of inquiry from every frontier surface —
 orient and infusion both — while leaving it fully queryable.
+
+Meaning matcher: `GEMINI_API_KEY` (env only, never argv),
+`NEO4J_MATCHER_MODEL` (default `gemini-3.5-flash-lite`),
+`NEO4J_MATCHER_ENDPOINT`, `NEO4J_MATCHER_TIMEOUT_MS` (default `5000` —
+sized to the measured reasoning tail, not the median), and
+`NEO4J_MATCHER_SIDECAR` (container path of the sidecar file). Hook-side,
+`AGENT_MEMORY_INFUSE_TRAJECTORY_TURNS` (default `7`) sets how many prior
+user turns the hook parses from the harness transcript and sends as the
+trajectory; `0` disables and selection sees the prompt alone.
 
 HTTP sessions are always **stateful** — there is no stateless option, by
 design: an encounter depends on the state that preceded it (per-session

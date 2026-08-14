@@ -98,6 +98,12 @@ import urllib.request
 
 DEFAULT_URL = os.environ.get("AGENT_MEMORY_MCP_URL", "http://127.0.0.1:8003/mcp/")
 TIMEOUT_S = float(os.environ.get("AGENT_MEMORY_INFUSE_TIMEOUT", "10.0"))
+# Trajectory (v0.9.0, the meaning matcher): full-mode selection reads the
+# session's arc, not a snapshot — meaning is temporal, and a 13-word prompt
+# under-determines it. The hook parses the harness transcript HOST-SIDE
+# (the server runs in a container without access to ~/.claude) and passes
+# the last N user turns alongside the prompt. 0 disables.
+TRAJECTORY_TURNS = int(os.environ.get("AGENT_MEMORY_INFUSE_TRAJECTORY_TURNS", "7"))
 SHADOW_LOG = os.environ.get(
     "AGENT_MEMORY_INFUSE_SHADOW_LOG",
     os.path.expanduser("~/.claude/agent_memory-infuse-shadow.jsonl"),
@@ -202,7 +208,7 @@ def _initialize(url: str) -> str | None:
             "params": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "agent_memory-infuse-hook", "version": "0.8.0"},
+                "clientInfo": {"name": "agent_memory-infuse-hook", "version": "0.9.0"},
             },
         },
         None,
@@ -212,14 +218,20 @@ def _initialize(url: str) -> str | None:
     return sid
 
 
-def _call_infuse(url: str, sid: str, text: str, mode: str) -> dict:
+def _call_infuse(
+    url: str, sid: str, text: str, mode: str,
+    trajectory: list[str] | None = None,
+) -> dict:
+    arguments: dict = {"text": text, "mode": mode}
+    if trajectory:
+        arguments["trajectory"] = trajectory
     msg, _ = _post(
         url,
         {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "infuse", "arguments": {"text": text, "mode": mode}},
+            "params": {"name": "infuse", "arguments": arguments},
         },
         sid,
     )
@@ -227,6 +239,49 @@ def _call_infuse(url: str, sid: str, text: str, mode: str) -> dict:
         raise RuntimeError(str(msg))
     content = msg["result"]["content"][0]["text"]
     return json.loads(content)
+
+
+def _user_turns(transcript_path: str, n: int) -> list[str]:
+    """The last n real user turns from the harness transcript (JSONL).
+
+    Stdlib mirror of the server's own parser (the hook stays standalone):
+    tool_result-only entries are not user turns, meta entries and
+    hook-injected <system-reminder> blocks are stripped — the trajectory is
+    what the person said, not what the harness wrapped around it. Any
+    failure returns [] and the call proceeds prompt-only (fail-silent)."""
+    turns: list[str] = []
+    try:
+        with open(transcript_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("type") != "user" or entry.get("isMeta"):
+                    continue
+                message = entry.get("message") or {}
+                if message.get("role") != "user":
+                    continue
+                content = message.get("content")
+                if isinstance(content, str):
+                    texts = [content]
+                elif isinstance(content, list):
+                    texts = [
+                        b.get("text", "")
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ]
+                else:
+                    texts = []
+                cleaned = [
+                    t.strip() for t in texts
+                    if t.strip() and not t.lstrip().startswith("<system-reminder")
+                ]
+                if cleaned:
+                    turns.append("\n".join(cleaned))
+    except OSError:
+        return []
+    return turns[-n:]
 
 
 def _focal_text(hook_input: dict, mode: str) -> str:
@@ -293,6 +348,19 @@ def main() -> int:
     if not text.strip():
         return 0
 
+    # Trajectory for full mode: the last N user turns before this prompt,
+    # parsed host-side from the harness transcript. The transcript's tail
+    # usually IS this prompt — drop the duplicate so the server sees the
+    # current prompt exactly once, last.
+    trajectory: list[str] = []
+    if args.mode == "full" and TRAJECTORY_TURNS > 0:
+        tpath = str(hook_input.get("transcript_path", "") or "")
+        if tpath:
+            trajectory = _user_turns(tpath, TRAJECTORY_TURNS + 1)
+            if trajectory and trajectory[-1].strip() == text.strip():
+                trajectory = trajectory[:-1]
+            trajectory = trajectory[-TRAJECTORY_TURNS:]
+
     # The join anchor for the observation stream: sha256 of the stripped
     # focal text, first 16 hex. The invocation scorer hashes each transcript
     # prompt identically and joins on it — a missed call then reads as a
@@ -307,7 +375,10 @@ def main() -> int:
 
     try:
         try:
-            result = _call_infuse(args.url, sid, text, args.mode) if sid else {}
+            result = (
+                _call_infuse(args.url, sid, text, args.mode, trajectory)
+                if sid else {}
+            )
             if not sid:
                 raise RuntimeError("no cached session")
         except Exception:
@@ -315,7 +386,7 @@ def main() -> int:
             sid = _initialize(args.url)
             if not sid:
                 raise RuntimeError("initialize failed")
-            result = _call_infuse(args.url, sid, text, args.mode)
+            result = _call_infuse(args.url, sid, text, args.mode, trajectory)
     except Exception as exc:
         # Fail silent toward the harness — but the observation stream records
         # the attempt. An unlogged failure is what made the positional join
@@ -355,6 +426,12 @@ def main() -> int:
         # cutover. Absent on pre-0.8.0 servers; .get keeps old servers clean.
         "assembly": result.get("assembly"),
         "server_version": result.get("server_version"),
+        # v0.9.0: which seed channel ran (meaning vs lexical_fallback) and
+        # the matcher's own metadata — the seam marker for the selection
+        # cutover, stratifiable exactly as A9 stratifies on server_version.
+        "selection_channel": result.get("selection_channel"),
+        "matcher": result.get("matcher"),
+        "trajectory_turns": len(trajectory),
         "timings_ms": result.get("timings_ms"),
         "payload_chars": len(payload),
         "payload": payload,

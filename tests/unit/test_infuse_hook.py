@@ -138,3 +138,48 @@ class TestGateEndToEnd:
                           tmp_path, self.STDIN)
         assert proc.returncode == 0
         assert not any(r.get("skipped") for r in recs)
+
+
+class TestUserTurns:
+    """Trajectory extraction (v0.9.0): the hook parses the harness
+    transcript HOST-SIDE and passes the last N user turns — the server's
+    container cannot see ~/.claude, so this is the only live path."""
+
+    def _write(self, tmp_path, entries):
+        p = tmp_path / "transcript.jsonl"
+        p.write_text("\n".join(json.dumps(e) for e in entries))
+        return str(p)
+
+    def test_last_n_user_text_turns_in_order(self, tmp_path):
+        entries = [
+            {"type": "user", "message": {"role": "user", "content": "one"}},
+            {"type": "assistant", "message": {"role": "assistant",
+                                              "content": "reply"}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": "two"}]}},
+            {"type": "user", "message": {"role": "user", "content": "three"}},
+        ]
+        assert hook._user_turns(self._write(tmp_path, entries), 2) == [
+            "two", "three",
+        ]
+
+    def test_tool_results_meta_and_reminders_are_not_turns(self, tmp_path):
+        entries = [
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "content": "output"}]}},
+            {"type": "user", "isMeta": True,
+             "message": {"role": "user", "content": "meta"}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "text",
+                 "text": "<system-reminder>injected</system-reminder>"},
+                {"type": "text", "text": "the real ask"}]}},
+        ]
+        assert hook._user_turns(self._write(tmp_path, entries), 5) == [
+            "the real ask",
+        ]
+
+    def test_failures_return_empty_never_raise(self, tmp_path):
+        assert hook._user_turns(str(tmp_path / "absent.jsonl"), 3) == []
+        p = tmp_path / "garbage.jsonl"
+        p.write_text("not json at all\n{broken")
+        assert hook._user_turns(str(p), 3) == []

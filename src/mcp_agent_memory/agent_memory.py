@@ -1484,6 +1484,175 @@ class Neo4jAgentMemory:
             for r in result.records
         ]
 
+    async def lexical_channel_rank(
+        self, text: str, top_n: int = 10
+    ) -> dict[str, Any]:
+        """The lexical selection arm, standalone: Extract -> Match
+        (fulltext) -> eligible seeds -> B2 expansion -> ONE biased PageRank
+        over an ephemeral coherence projection — the pre-v0.9.0 seed
+        discovery, kept as the diagnostic baseline and as infuse_meaning's
+        fallback arm. No frontier seeding (the frontier arrives by standing
+        bias, not prompt reach — it would ride identically in every
+        diagnostic call). Per-candidate provenance: 'lexical'
+        (fulltext-matched), 'expansion' (B2 sibling seed), 'rank' (surfaced
+        by rank spread alone). Reads only; deterministic for a fixed graph
+        state."""
+        timings: dict[str, float] = {}
+        t0 = time.perf_counter()
+        signals = extract_focal_signals(text)
+        seed_terms = [s["term"] for s in signals]
+        matches: list[dict[str, Any]] = []
+        if signals:
+            matches = await self._match_focal(
+                lucene_query(signals), self._INFUSE_SEED_LIMIT
+            )
+        timings["extract_match"] = time.perf_counter() - t0
+        return await self._selection_from_matches(
+            matches, seed_terms, top_n, timings, t0
+        )
+
+    async def seeded_channel_rank(
+        self, matches: list[dict[str, Any]], seed_terms: list[str],
+        top_n: int = 10,
+    ) -> dict[str, Any]:
+        """The meaning arm's diagnostic downstream (infuse_meaning): the
+        identical shared stages (eligible seeds -> B2 expansion -> biased
+        rank) fed by PRE-RESOLVED matches — the matcher's selections
+        instead of fulltext hits. No Match query runs; everything
+        downstream is byte-identical. Reads only."""
+        timings: dict[str, float] = {}
+        t0 = time.perf_counter()
+        return await self._selection_from_matches(
+            matches, seed_terms, top_n, timings, t0
+        )
+
+    async def _selection_from_matches(
+        self,
+        matches: list[dict[str, Any]],
+        seed_terms: list[str],
+        top_n: int,
+        timings: dict[str, float],
+        t0: float,
+    ) -> dict[str, Any]:
+        """The shared selection downstream for the standalone arms: eligible
+        seeds -> B2 expansion -> ephemeral projection -> biased PageRank ->
+        per-candidate provenance. Factored from lexical_channel_rank so the
+        lifted arm runs the byte-identical stages after Match."""
+        rel_filter, source_labels, target_labels = coherence_projection_parts()
+        t1 = time.perf_counter()
+        focal_seeds = await self._eligible_seeds(
+            [m["name"] for m in matches], rel_filter
+        )
+        expansion_seeds: list[str] = []
+        if focal_seeds:
+            exp_res = await self.driver.execute_query(
+                lit(
+                    f"MATCH (s:Concept)-[:{rel_filter}]-(n) "
+                    "WHERE s.name IN $focal AND NOT n:Encounter "
+                    "RETURN DISTINCT n.name AS name LIMIT $lim"
+                ),
+                {"focal": focal_seeds, "lim": self._INFUSE_SEED_LIMIT * 2},
+                routing_=RoutingControl.READ,
+            )
+            expansion_seeds = [
+                r["name"] for r in exp_res.records
+                if r["name"] not in set(focal_seeds)
+            ][: self._INFUSE_SEED_LIMIT]
+        timings["seeds"] = time.perf_counter() - t1
+
+        match_names = {m["name"] for m in matches}
+        if not focal_seeds:
+            # No matched seed carries coherence structure: the lexical arm
+            # has nothing to rank from. An empty arm is a result, not an
+            # error — Gate 2's known failures look exactly like this.
+            timings["total"] = time.perf_counter() - t0
+            return {
+                "candidates": [
+                    {
+                        "name": m["name"], "type": m["type"],
+                        "score": float(m["score"]), "channels": ["lexical"],
+                    }
+                    for m in matches[:top_n]
+                ],
+                "seed_terms": seed_terms,
+                "note": (
+                    "no eligible seeds — showing raw fulltext matches only"
+                    if matches else "no fulltext matches"
+                ),
+                "timings_ms": {
+                    k: round(v * 1000, 1) for k, v in timings.items()
+                },
+            }
+
+        proj = f"__agent_memory_compare_{uuid.uuid4().hex[:8]}__"
+        project_query = lit(
+            f"MATCH (source)-[r:{rel_filter}]->(target) "
+            f"WHERE ({source_labels}) AND ({target_labels}) "
+            "RETURN gds.graph.project($proj, source, target, {}, "
+            "{undirectedRelationshipTypes: ['*']}) AS g"
+        )
+        biased_query = lit(
+            "OPTIONAL MATCH (f) WHERE f.name IN $focal "
+            "WITH collect(DISTINCT f) AS fs "
+            "OPTIONAL MATCH (e) WHERE e.name IN $expansion "
+            "WITH fs, collect(DISTINCT e) AS es "
+            "WITH [n IN fs | [id(n), 1.0]] + [n IN es | [id(n), $exp_bias]] AS pairs "
+            "CALL gds.pageRank.stream($proj, {sourceNodes: pairs}) "
+            "YIELD nodeId, score "
+            "WITH gds.util.asNode(nodeId) AS n, score WHERE score > 1e-9 "
+            "RETURN n.name AS node, labels(n)[0] AS type, score "
+            "ORDER BY score DESC LIMIT $lim"
+        )
+        t2 = time.perf_counter()
+        try:
+            await self.driver.execute_query(
+                project_query, {"proj": proj}, routing_=RoutingControl.READ
+            )
+            res = await self.driver.execute_query(
+                biased_query,
+                {
+                    "proj": proj,
+                    "focal": focal_seeds,
+                    "expansion": expansion_seeds,
+                    "exp_bias": self._INFUSE_EXPANSION_BIAS,
+                    "lim": top_n,
+                },
+                routing_=RoutingControl.READ,
+            )
+            ranked = [dict(r) for r in res.records]
+        finally:
+            await self.driver.execute_query(
+                "CALL gds.graph.drop($proj, false) YIELD graphName RETURN graphName",
+                {"proj": proj},
+                routing_=RoutingControl.WRITE,
+            )
+        timings["rank"] = time.perf_counter() - t2
+        timings["total"] = time.perf_counter() - t0
+
+        expansion_set = set(expansion_seeds)
+        candidates = []
+        for r in ranked:
+            channels = []
+            if r["node"] in match_names:
+                channels.append("lexical")
+            if r["node"] in expansion_set:
+                channels.append("expansion")
+            if not channels:
+                channels.append("rank")
+            candidates.append(
+                {
+                    "name": r["node"], "type": r["type"],
+                    "score": float(r["score"]), "channels": channels,
+                }
+            )
+        return {
+            "candidates": candidates,
+            "seed_terms": seed_terms,
+            "focal_seeds": focal_seeds,
+            "expansion_seeds": expansion_seeds,
+            "timings_ms": {k: round(v * 1000, 1) for k, v in timings.items()},
+        }
+
     async def infuse(
         self,
         text: str,
@@ -1494,6 +1663,8 @@ class Neo4jAgentMemory:
         locus_key: str | None = None,
         refresh_turns: int = 10,
         expansion_bias: float | None = None,
+        seed_matches: list[dict[str, Any]] | None = None,
+        selection_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The governed infusion read: Extract -> Match -> Rank -> Format.
 
@@ -1517,6 +1688,18 @@ class Neo4jAgentMemory:
         the hook stays silent. Fired at tool-batch boundaries; no GDS, fast.
         Attenuation is one failure of the living present; burying the
         arriving present under sediment after every batch is the other.
+
+        seed_matches (v0.9.0, the meaning-matcher integration): pre-resolved
+        focal-seed candidates from the meaning matcher — the orchestrating
+        layer runs the matcher (trajectory ↔ compressed node meanings) and
+        hands the selections in; when present, they replace the fulltext
+        Match as the SEED SOURCE and nothing else. Everything downstream —
+        eligible-seed filtering, the frontier bias, B2 expansion, the one
+        biased rank, triage, assembly, renewal, delivery — is byte-identical
+        either way: the matcher sharpens seed discovery, the governors stay
+        the governance. Delta mode ignores it (the delta channel stays
+        lexical: fast, cheap, per-batch). selection_meta is carried into the
+        result verbatim for the observe log.
         """
         if mode not in ("full", "delta"):
             raise ValueError(f"Unknown infuse mode '{mode}'. Use 'full' or 'delta'.")
@@ -1531,7 +1714,9 @@ class Neo4jAgentMemory:
 
         t1 = time.perf_counter()
         matches: list[dict[str, Any]] = []
-        if signals:
+        if mode == "full" and seed_matches is not None:
+            matches = seed_matches[: self._INFUSE_SEED_LIMIT]
+        elif signals:
             matches = await self._match_focal(
                 lucene_query(signals),
                 self._INFUSE_DELTA_MATCH_LIMIT
@@ -1544,7 +1729,7 @@ class Neo4jAgentMemory:
             return await self._infuse_delta(
                 seed_terms, matches, max_chars, timings, t0, locus_key
             )
-        return await self._infuse_full(
+        result = await self._infuse_full(
             seed_terms, matches, frontier_bias, max_chars, result_limit,
             timings, t0, locus_key,
             refresh_turns=max(1, min(100, refresh_turns)),
@@ -1553,6 +1738,12 @@ class Neo4jAgentMemory:
                 else max(0.0, min(1.0, expansion_bias))
             ),
         )
+        result["selection_channel"] = (
+            "meaning" if seed_matches is not None else "lexical"
+        )
+        if selection_meta is not None:
+            result["matcher"] = selection_meta
+        return result
 
     async def _infuse_delta(
         self,

@@ -204,6 +204,41 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
         rt = _env_int("NEO4J_INFUSE_REFRESH_TURNS")
     config["infuse_refresh_turns"] = 10 if rt is None else max(1, min(100, rt))
 
+    # The meaning matcher (v0.9.0) — infuse's full-mode seed source: one
+    # model compresses every node's meaning offline into the sidecar (built
+    # by scripts/build_meaning_sidecar.py — never node properties), and the
+    # SAME model matches trajectory ↔ meanings per prompt (single-voice
+    # authorship is what closes the two-idiolect gap; measured T0 recall 7/8
+    # vs the 2/8 lexical baseline). The key comes from GEMINI_API_KEY (env
+    # only, never a CLI flag — argv is visible in process listings); without
+    # it, infuse falls back to the lexical Extract->Match path and says so.
+    # Timeout default 5000 ms — a deliberate, measured renegotiation: the
+    # arc-dependent cases that justify the mechanism take ~3.5s of
+    # reasoning, and a cap that cuts the tail kills exactly the calls
+    # buying the most. gemini-3.5-flash-lite is the most performant capable
+    # model reachable without hardware/self-hosting; residual network TTFT
+    # is the price of that portability.
+    config["matcher_api_key"] = os.getenv("GEMINI_API_KEY") or ""
+    config["matcher_endpoint"] = (
+        args.matcher_endpoint
+        or os.getenv("NEO4J_MATCHER_ENDPOINT")
+        or "https://generativelanguage.googleapis.com/v1beta"
+    )
+    config["matcher_model"] = (
+        args.matcher_model
+        or os.getenv("NEO4J_MATCHER_MODEL")
+        or "gemini-3.5-flash-lite"
+    )
+    mt = args.matcher_timeout_ms
+    if mt is None:
+        mt = _env_int("NEO4J_MATCHER_TIMEOUT_MS")
+    config["matcher_timeout_ms"] = 5000 if mt is None else max(100, min(10_000, mt))
+    config["matcher_sidecar"] = (
+        args.matcher_sidecar
+        or os.getenv("NEO4J_MATCHER_SIDECAR")
+        or "models/meaning_sidecar.json"
+    )
+
     # No stateless-HTTP option, by design (v0.3.0). Encounters within a session
     # are stateful by definition — they depend on the states that preceded them
     # (per-locus chaining, locus-scoped write targeting) — so HTTP sessions are

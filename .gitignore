@@ -26,6 +26,10 @@ venv/
 .idea/
 .vscode/
 
+# Semantic channel model artifacts (34 MB ONNX + tokenizer) — fetched by
+# scripts/fetch_semantic_model.py, never committed
+models/
+
 # seal-public build output + local target pointer (machine-specific path)
 publish/.staging/
 publish/.target

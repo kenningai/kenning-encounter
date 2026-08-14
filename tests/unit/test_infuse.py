@@ -869,6 +869,8 @@ class TestInfuseConfig:
             server_path=None, allow_origins=None, allowed_hosts=None,
             read_timeout=None, infuse_frontier_bias=None,
             infuse_refresh_turns=None,
+            matcher_endpoint=None, matcher_model=None,
+            matcher_timeout_ms=None, matcher_sidecar=None,
         )
         base.update(overrides)
         return argparse.Namespace(**base)
@@ -901,6 +903,32 @@ class TestInfuseConfig:
         assert process_config(
             self._args(infuse_refresh_turns=0)
         )["infuse_refresh_turns"] == 1
+
+    def test_matcher_config_default_env_cli_clamp(self, monkeypatch):
+        for var in ("GEMINI_API_KEY", "NEO4J_MATCHER_ENDPOINT",
+                    "NEO4J_MATCHER_MODEL", "NEO4J_MATCHER_TIMEOUT_MS",
+                    "NEO4J_MATCHER_SIDECAR"):
+            monkeypatch.delenv(var, raising=False)
+        cfg = process_config(self._args())
+        assert cfg["matcher_api_key"] == ""
+        assert cfg["matcher_endpoint"] == (
+            "https://generativelanguage.googleapis.com/v1beta"
+        )
+        assert cfg["matcher_model"] == "gemini-3.5-flash-lite"
+        assert cfg["matcher_timeout_ms"] == 5000  # measured renegotiation
+        assert cfg["matcher_sidecar"] == "models/meaning_sidecar.json"
+        monkeypatch.setenv("GEMINI_API_KEY", "k-123")
+        monkeypatch.setenv("NEO4J_MATCHER_MODEL", "gemini-other")
+        monkeypatch.setenv("NEO4J_MATCHER_TIMEOUT_MS", "99999")
+        monkeypatch.setenv("NEO4J_MATCHER_SIDECAR", "/app/models/m.json")
+        cfg = process_config(self._args())
+        assert cfg["matcher_api_key"] == "k-123"
+        assert cfg["matcher_model"] == "gemini-other"
+        assert cfg["matcher_timeout_ms"] == 10_000  # ceiling
+        assert cfg["matcher_sidecar"] == "/app/models/m.json"
+        assert process_config(
+            self._args(matcher_timeout_ms=50)
+        )["matcher_timeout_ms"] == 100  # floor
 
 
 # -- Progression assembly (v0.8.0, the progression reform) -----------------------

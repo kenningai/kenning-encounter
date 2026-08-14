@@ -67,7 +67,7 @@ services:
 
   agent_memory:
     build: .
-    image: mcp-agent-memory:0.6.0
+    image: mcp-agent-memory:0.7.0
     container_name: agent_memory-mcp
     depends_on:
       neo4j:
@@ -93,6 +93,34 @@ services:
       # Hand-set until EXPERIMENT-BARLOW B1 places it at the measured knee of
       # the attenuation curve. Do not tune by feel — that is the whole point.
       NEO4J_INFUSE_REFRESH_TURNS: "10"
+      # The meaning matcher (v0.9.0) — infuse's full-mode seed source
+      # (measured in at T0: recall 7/8 vs the 2/8 lexical baseline,
+      # trajectory +2). GEMINI_API_KEY rides in from .env (compose
+      # auto-loads it); no key -> infuse falls back to the lexical
+      # Extract->Match path and reports it. The sidecar of compressed node
+      # meanings is built on the host by scripts/build_meaning_sidecar.py
+      # (incremental; rerun after write-heavy sessions) and rides in
+      # through the read-only ./models mount; the server reloads it on
+      # mtime change, so a host-side rebuild reaches the container without
+      # a restart. Sidecar only — never node properties; nothing written
+      # to Neo4j. Timeout 5000ms is deliberate and measured: the
+      # arc-dependent cases that justify the mechanism take ~3.5s of
+      # reasoning, and a cap that cuts the tail kills exactly the calls
+      # buying the most.
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      NEO4J_MATCHER_MODEL: "${NEO4J_MATCHER_MODEL:-gemini-3.5-flash-lite}"
+      NEO4J_MATCHER_TIMEOUT_MS: "${NEO4J_MATCHER_TIMEOUT_MS:-5000}"
+      NEO4J_MATCHER_SIDECAR: "/app/models/meaning_sidecar.json"
+    volumes:
+      # The meaning sidecar lives INSIDE the stack, like neo4j_data — a
+      # named volume, not a host file, so nothing on the host (cleanup
+      # jobs, path conventions, curious hands) can touch it and the whole
+      # Agent Memory is one `docker compose up`. It is a derived, self-healing
+      # cache: the server meaning-makes new nodes into it on write and a
+      # startup reconcile sweep rebuilds any gap — up to the entire file —
+      # from the graph. Inspect with:
+      #   docker exec agent_memory-mcp cat /app/models/meaning_sidecar.json
+      - sidecar_data:/app/models
       # HTTP sessions are always stateful (v0.3.0) — no knob. The session IS
       # the locus: encounters depend on the states that preceded them, so the
       # mcp-session-id carries the locus identity and close_encounter /
@@ -102,3 +130,4 @@ services:
 volumes:
   neo4j_data:
   neo4j_logs:
+  sidecar_data:

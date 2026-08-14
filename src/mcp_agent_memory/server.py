@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -30,6 +32,17 @@ from .agent_memory import (
     RELATION_SCHEMAS,
     PROCESS_TYPES,
     PROCESS_EDGES,
+)
+from .meaning import (
+    MeaningIndex,
+    MeaningUnavailable,
+    assemble_trajectory,
+    compress_meaning,
+    content_hash,
+    format_meaning_report,
+    match_meanings,
+    sidecar_diff,
+    user_turns_from_transcript,
 )
 from .utils import format_namespace, _is_write_query, _value_sanitize, lit
 
@@ -99,11 +112,49 @@ def create_mcp_server(
     read_timeout: int = 30,
     infuse_frontier_bias: float = 0.3,
     infuse_refresh_turns: int = 10,
+    matcher_api_key: str = "",
+    matcher_endpoint: str = "https://generativelanguage.googleapis.com/v1beta",
+    matcher_model: str = "gemini-3.5-flash-lite",
+    matcher_timeout_ms: int = 5000,
+    matcher_sidecar: str = "models/meaning_sidecar.json",
 ) -> FastMCP:
     """Create an MCP server instance for the Agent Memory."""
 
     ns = format_namespace(namespace)
     mcp: FastMCP = FastMCP("mcp-agent-memory")
+
+    meaning_index = MeaningIndex(matcher_sidecar)
+
+    async def _sidecar_meaning_make(nodes: list[dict[str, Any]]) -> None:
+        """The on-write trigger: compress newly created/edited nodes into
+        the sidecar, in the background — a guard in code, not in vigilance.
+        A human told to rebuild the sidecar after write-heavy sessions will
+        forget, guaranteed; the server that performed the write cannot.
+        Never blocks or fails the write it rides on: every failure is
+        logged and left for the startup reconcile sweep to retry; the node
+        stays reachable through the lexical fallback path meanwhile.
+        Writes ONLY the sidecar file — never Neo4j."""
+        try:
+            known = meaning_index.known_nodes()
+            entries: dict[str, dict[str, Any]] = {}
+            for n in nodes:
+                h = content_hash(n["name"], n.get("description") or "")
+                prev = known.get(n["name"])
+                if prev and prev.get("hash") == h and prev.get("meaning"):
+                    continue
+                meaning = await compress_meaning(
+                    n, matcher_api_key, matcher_model, matcher_endpoint
+                )
+                entries[n["name"]] = {
+                    "type": n.get("type", "?"), "hash": h, "meaning": meaning,
+                }
+            if entries:
+                meaning_index.upsert(entries)
+                logger.info(
+                    f"sidecar: meaning-made {len(entries)} node(s) on write"
+                )
+        except Exception as e:
+            logger.warning(f"sidecar on-write compression deferred: {e}")
 
     # -- Process Layer (the guarded spine) ------------------------------------
 
@@ -259,6 +310,18 @@ def create_mcp_server(
                 entities, encounter=encounter,
                 locus_key=_locus_key(ctx) if ctx else None,
             )
+            # Automatic meaning-making (background, fail-silent): every
+            # node born or edited here enters the matcher's sidecar without
+            # anyone remembering to rebuild it.
+            asyncio.create_task(_sidecar_meaning_make([
+                {
+                    "name": e.get("name"),
+                    "type": e.get("type"),
+                    "description": e.get("description") or "",
+                }
+                for e in entities
+                if e.get("name") and e.get("type") != "Encounter"
+            ]))
             return _json_result(result)
 
     @mcp.tool(
@@ -286,6 +349,10 @@ def create_mcp_server(
         """
         async with _tool_errors("delete_entities"):
             result = await agent_memory.delete_entities(names)
+            try:
+                meaning_index.remove(names)
+            except Exception as e:
+                logger.warning(f"sidecar removal deferred: {e}")
             return _json_result(result)
 
     # -- Relation Tools (coherence layer) -------------------------------------
@@ -853,16 +920,34 @@ def create_mcp_server(
                 "0 disables expansion — used by the B2 benchmark's OFF arm)."
             ),
         ),
+        trajectory: list[str] | None = Field(
+            default=None,
+            description=(
+                "Prior user turns of the session, oldest first, current "
+                "prompt excluded (it is `text`). Supplied by the hook "
+                "client, which parses the harness transcript host-side. "
+                "Feeds the meaning matcher (mode 'full' only): meaning is "
+                "temporal, and a snapshot prompt under-determines it."
+            ),
+        ),
         ctx: Context | None = None,
     ) -> ToolResult:
         """The governed infusion read — mechanized passive synthesis.
 
         Re-awakens a topologically-relevant projection of the substrate
-        against the arriving present: Extract (focal signals) -> Match
-        (fulltext) -> Rank (ONE biased computation: focal seeds @1.0 blended
-        with the standing frontier @~0.3, over an ephemeral coherence-only
-        projection, divergence-checked against unbiased mass) -> Format
-        (signed payload, coherence tension first). NOT retrieval — the payload
+        against the arriving present. Since v0.9.0, full-mode SEED DISCOVERY
+        is the meaning matcher (measured in: T0 recall 7/8 vs the lexical
+        2/8 baseline, trajectory contributing +2): one model compressed
+        every node's meaning offline (the sidecar), and the same model reads
+        those meanings plus the session trajectory and selects what BEARS on
+        the current moment — unnamed constraints included. The selections
+        seed the unchanged governed pipeline: eligible-seed filter, frontier
+        blend @~0.3, B2 expansion, ONE biased rank over the ephemeral
+        coherence projection, divergence vs unbiased mass, tension-first
+        format. On any matcher failure (no key, no sidecar, timeout,
+        malformed output) the lexical Extract -> fulltext Match path runs
+        instead — reported in the result, never an error. Delta mode stays
+        lexical by design (fast, per-batch). NOT retrieval — the payload
         answers "what is the topology of what I already hold about this?".
 
         Governance, structurally: the payload is SIGNED (a proposal from the
@@ -878,6 +963,47 @@ def create_mcp_server(
         separate, authored, and yours.
         """
         async with _tool_errors("infuse"):
+            # Meaning-matched seed discovery (v0.9.0). The matcher replaces
+            # ONLY the seed source; every governor downstream is untouched.
+            # Seed-count parity with the lexical path (_INFUSE_SEED_LIMIT)
+            # is deliberate — the governors were tuned at that scale.
+            seed_matches: list[dict[str, Any]] | None = None
+            selection_meta: dict[str, Any] | None = None
+            if mode == "full":
+                try:
+                    prefix, ordered_names = meaning_index.prefix()
+                    traj_text, traj_meta = assemble_trajectory(
+                        trajectory or [], text
+                    )
+                    matched = await match_meanings(
+                        prefix, ordered_names, traj_text, 12,
+                        matcher_api_key, matcher_model, matcher_endpoint,
+                        timeout_ms=matcher_timeout_ms,
+                    )
+                    k = len(matched["selections"])
+                    seed_matches = [
+                        {
+                            "name": s["name"],
+                            "type": meaning_index.node_type(s["name"]),
+                            "score": float(k - i) / k,
+                        }
+                        for i, s in enumerate(matched["selections"])
+                    ]
+                    selection_meta = {
+                        "channel": "meaning",
+                        "ms": matched["ms"],
+                        "prompt_tokens": matched["prompt_tokens"],
+                        "cached_tokens": matched["cached_tokens"],
+                        "trajectory": traj_meta,
+                        "sidecar_size": meaning_index.size,
+                    }
+                except MeaningUnavailable as e:
+                    # Fallback is a reported result, not an error: the
+                    # lexical path below is the pre-v0.9.0 behaviour.
+                    selection_meta = {
+                        "channel": "lexical_fallback",
+                        "fallback_reason": str(e),
+                    }
             result = await agent_memory.infuse(
                 text=text,
                 mode=mode,
@@ -888,8 +1014,184 @@ def create_mcp_server(
                 refresh_turns=infuse_refresh_turns,
                 expansion_bias=expansion_bias,
                 locus_key=_locus_key(ctx) if ctx else None,
+                seed_matches=seed_matches,
+                selection_meta=selection_meta,
             )
             return _json_result(result)
+
+    @mcp.tool(
+        name=ns + "infuse_meaning",
+        annotations=ToolAnnotations(
+            title="Infuse Meaning (matcher diagnostic)", readOnlyHint=True,
+            destructiveHint=False, idempotentHint=True, openWorldHint=True,
+        ),
+    )
+    async def infuse_meaning(
+        text: str = Field(
+            ...,
+            description="The current prompt — the trajectory's final turn.",
+        ),
+        top_n: int = Field(
+            default=10, ge=1, le=30,
+            description="How many candidates to report (default 10).",
+        ),
+        trajectory_turns: int = Field(
+            default=7, ge=0, le=20,
+            description=(
+                "How many prior user turns to include from transcript_path "
+                "(ignored when an explicit trajectory is given; 0 = prompt "
+                "alone — Gate 2's comparison arm)."
+            ),
+        ),
+        trajectory: list[str] | None = Field(
+            default=None,
+            description=(
+                "Explicit prior user turns, oldest first, current prompt "
+                "excluded (it goes in `text`). The test-session path: "
+                "held-out cases carry authored arcs. Takes precedence over "
+                "transcript_path."
+            ),
+        ),
+        transcript_path: str | None = Field(
+            default=None,
+            description=(
+                "Path to a Claude Code transcript (JSONL) to draw the last "
+                "N user turns from — the hook-wiring path (transcript_path "
+                "already rides on the hook payload). Unreadable or absent "
+                "-> prompt-only, reported."
+            ),
+        ),
+        include_reasons: bool = Field(
+            default=False,
+            description=(
+                "Ask for a one-line reason per selection (debugging "
+                "artifact only). MEASURED COST: at top_n=30 reasons add "
+                "~2.5s of generation and blow the 2500ms timeout into "
+                "fallback; bare numbers run ~1.2s. Use only at small top_n."
+            ),
+        ),
+    ) -> ToolResult:
+        """The meaning matcher's DIAGNOSTIC surface — the T0 instrument, kept.
+
+        Since v0.9.0 the matcher is infuse's full-mode seed source; this
+        tool exposes the same mechanism as an inspectable ranked list (the
+        matcher's selections, then the resolved pipeline candidates with
+        provenance) without assembling a payload or touching any renewal
+        ledger. It is how the T0 gates were scored (recall 7/8 vs the 2/8
+        lexical baseline, trajectory +2) and how a researcher reproduces
+        them: authored `trajectory` turns + `text` as the final prompt;
+        `trajectory_turns=0` for the prompt-alone comparison arm. Offline,
+        one model compressed every node's name+description into a
+        one-sentence meaning (the sidecar — never node properties: the
+        graph stays authored by the agent alone); per call the SAME model
+        reads all meanings as a static cached prefix plus the trajectory
+        and selects what bears on the current moment, unnamed constraints
+        included.
+
+        The per-node reasons are a DEBUGGING ARTIFACT — generated alongside
+        the selection, not read off the mechanism; never record them as
+        evidence about why selection worked. Their cost is measured: at
+        top_n=30 they add ~2.5s of generation; leave include_reasons off
+        for scored runs.
+
+        FALLBACK, guaranteed: missing sidecar or key, timeout, transport
+        error, or malformed output -> current Extract behaviour, reported.
+        Reads only; nothing written to Neo4j. TIMING carries the
+        cached-token count so prefix-cache engagement is verifiable.
+        """
+        async with _tool_errors("infuse_meaning"):
+            selections: list[dict[str, Any]] = []
+            traj_meta: dict[str, int] = {}
+            match_ms: float | None = None
+            cached_tokens: int | None = None
+            prompt_tokens: int | None = None
+            sidecar_size: int | None = None
+            fallback = False
+            fallback_reason: str | None = None
+            try:
+                prefix, ordered_names = meaning_index.prefix()
+                sidecar_size = meaning_index.size
+                if trajectory is not None:
+                    prior = trajectory
+                elif transcript_path and trajectory_turns > 0:
+                    prior = user_turns_from_transcript(
+                        transcript_path, trajectory_turns
+                    )
+                    # The transcript's last user turn is usually `text`
+                    # itself — drop the duplicate so the current prompt
+                    # appears once, last.
+                    if prior and prior[-1].strip() == text.strip():
+                        prior = prior[:-1]
+                else:
+                    prior = []
+                traj_text, traj_meta = assemble_trajectory(prior, text)
+                matched = await match_meanings(
+                    prefix, ordered_names, traj_text, top_n,
+                    matcher_api_key, matcher_model, matcher_endpoint,
+                    timeout_ms=matcher_timeout_ms,
+                    include_reasons=include_reasons,
+                )
+                selections = matched["selections"]
+                match_ms = matched["ms"]
+                cached_tokens = matched["cached_tokens"]
+                prompt_tokens = matched["prompt_tokens"]
+            except MeaningUnavailable as e:
+                fallback = True
+                fallback_reason = str(e)
+
+            t0 = time.perf_counter()
+            if fallback:
+                arm = await agent_memory.lexical_channel_rank(text, top_n=top_n)
+            else:
+                matches = [
+                    {
+                        "name": s["name"],
+                        "type": meaning_index.node_type(s["name"]),
+                        "score": float(len(selections) - i) / len(selections),
+                    }
+                    for i, s in enumerate(selections)
+                ]
+                arm = await agent_memory.seeded_channel_rank(
+                    matches, [s["name"] for s in selections], top_n=top_n
+                )
+                # The shared downstream labels fulltext-matched seeds
+                # 'lexical'; in this arm the seeds came from the matcher.
+                for row in arm["candidates"]:
+                    row["channels"] = [
+                        "meaning" if c == "lexical" else c
+                        for c in row["channels"]
+                    ]
+            pipeline_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+            report = format_meaning_report(
+                selections, arm["candidates"], traj_meta,
+                match_ms, pipeline_ms,
+                cached_tokens=cached_tokens, prompt_tokens=prompt_tokens,
+                sidecar_size=sidecar_size,
+                fallback=fallback, fallback_reason=fallback_reason,
+            )
+            return _text_result(
+                report,
+                structured={
+                    "result": {
+                        "selections": selections,
+                        "candidates": arm["candidates"],
+                        "trajectory": traj_meta,
+                        "fallback": fallback,
+                        "fallback_reason": fallback_reason,
+                        "timings_ms": {
+                            "match": match_ms,
+                            "pipeline": pipeline_ms,
+                            "pipeline_detail": arm.get("timings_ms"),
+                        },
+                        "cache": {
+                            "prompt_tokens": prompt_tokens,
+                            "cached_tokens": cached_tokens,
+                        },
+                        "sidecar_size": sidecar_size,
+                    }
+                },
+            )
 
     # -- Operations Manual (the discipline, served as a resource) -------------
 
@@ -927,6 +1229,11 @@ async def main(
     read_timeout: int = 30,
     infuse_frontier_bias: float = 0.3,
     infuse_refresh_turns: int = 10,
+    matcher_api_key: str = "",
+    matcher_endpoint: str = "https://generativelanguage.googleapis.com/v1beta",
+    matcher_model: str = "gemini-3.5-flash-lite",
+    matcher_timeout_ms: int = 5000,
+    matcher_sidecar: str = "models/meaning_sidecar.json",
 ) -> None:
     logger.info("Starting Agent Memory MCP Server")
     logger.info(f"Connecting to Neo4j at: {neo4j_uri}")
@@ -956,6 +1263,54 @@ async def main(
     await agent_memory.create_fulltext_index()
     await agent_memory.create_indexes()
 
+    # Startup reconcile sweep (background, non-blocking): the on-write
+    # trigger covers nodes created through THIS server while it runs; the
+    # sweep covers everything else — nodes written while the server was
+    # down, compression calls that failed and were deferred, edits from
+    # other writers. Trigger for the common path, sweep for the tail: the
+    # two together are what makes the sidecar automatic rather than a
+    # human's chore. Writes only the sidecar file; the graph is read-only
+    # to this entire path.
+    async def _sidecar_reconcile() -> None:
+        try:
+            index = MeaningIndex(matcher_sidecar)
+            res = await agent_memory.driver.execute_query(
+                "MATCH (n) WHERE NOT n:Encounter AND n.name IS NOT NULL "
+                "RETURN n.name AS name, labels(n)[0] AS type, "
+                "       coalesce(n.description, '') AS description",
+                routing_=RoutingControl.READ,
+            )
+            graph_nodes = [dict(r) for r in res.records]
+            to_compress, to_remove = sidecar_diff(
+                graph_nodes, index.known_nodes(),
+                sidecar_version=index.file_version(),
+            )
+            if to_remove:
+                index.remove(to_remove)
+            done = 0
+            for n in to_compress:
+                try:
+                    meaning = await compress_meaning(
+                        n, matcher_api_key, matcher_model, matcher_endpoint
+                    )
+                    index.upsert({n["name"]: {
+                        "type": n.get("type", "?"), "hash": n["hash"],
+                        "meaning": meaning,
+                    }})
+                    done += 1
+                except Exception as e:
+                    logger.warning(
+                        f"sidecar reconcile: {n['name']!r} deferred: {e}"
+                    )
+            logger.info(
+                f"sidecar reconcile: {done}/{len(to_compress)} compressed, "
+                f"{len(to_remove)} removed, corpus {len(graph_nodes)}"
+            )
+        except Exception as e:
+            logger.warning(f"sidecar reconcile failed (non-fatal): {e}")
+
+    asyncio.create_task(_sidecar_reconcile())
+
     custom_middleware = [
         Middleware(
             CORSMiddleware,
@@ -973,6 +1328,11 @@ async def main(
         agent_memory, namespace, read_timeout=read_timeout,
         infuse_frontier_bias=infuse_frontier_bias,
         infuse_refresh_turns=infuse_refresh_turns,
+        matcher_api_key=matcher_api_key,
+        matcher_endpoint=matcher_endpoint,
+        matcher_model=matcher_model,
+        matcher_timeout_ms=matcher_timeout_ms,
+        matcher_sidecar=matcher_sidecar,
     )
 
     try:

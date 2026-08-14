@@ -53,6 +53,33 @@ def main():
             "re-delivers (default: 10; EXPERIMENT-BARLOW B1 will place it)"
         ),
     )
+    parser.add_argument(
+        "--matcher-endpoint", default=None,
+        help=(
+            "Base URL for the meaning matcher's Gemini API (default: "
+            "https://generativelanguage.googleapis.com/v1beta). The key "
+            "comes from GEMINI_API_KEY, env only; no key -> infuse falls "
+            "back to the lexical Extract->Match path"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-model", default=None,
+        help="Matcher model name (default: gemini-3.5-flash-lite)",
+    )
+    parser.add_argument(
+        "--matcher-timeout-ms", type=int, default=None,
+        help=(
+            "Hard matcher timeout in ms (default: 5000, sized to the "
+            "measured reasoning tail; fallback on expiry)"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-sidecar", default=None,
+        help=(
+            "Path to the compressed-meanings sidecar (default: "
+            "models/meaning_sidecar.json; missing -> lexical fallback)"
+        ),
+    )
 
     args = parser.parse_args()
     config = process_config(args)
