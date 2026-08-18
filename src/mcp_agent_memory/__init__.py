@@ -50,7 +50,8 @@ def main():
         "--infuse-refresh-turns", type=int, default=None,
         help=(
             "Renewal refresh horizon: turns before a standing body "
-            "re-delivers (default: 10; EXPERIMENT-BARLOW B1 will place it)"
+            "re-delivers (default: 10; a tunable whose correct value is "
+                "an empirical question, not a preference)"
         ),
     )
     parser.add_argument(

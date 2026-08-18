@@ -11,9 +11,7 @@ from .infuse import (
     commit_delivery,
     commit_progression,
     content_key,
-    delta_novelty,
     extract_focal_signals,
-    format_delta,
     format_payload,
     format_progression,
     group_progressions,
@@ -29,10 +27,10 @@ from .utils import load_cypher, lit
 logger = logging.getLogger("mcp_agent_memory")
 logger.setLevel(logging.INFO)
 
-# Stamped into every infuse result so the observe log can stratify B1 rows
-# on server version across instrument seams (EXPERIMENT-BARLOW A9: rows
-# before and after the v0.8.0 progression cutover are not comparable
-# row-for-row; the version is the seam marker).
+# Stamped into every infuse result so the observe log can stratify rows on
+# server version across instrument seams: rows before and after the v0.8.0
+# progression cutover are not comparable row-for-row, and the version is
+# what marks the seam.
 try:
     _SERVER_VERSION = importlib.metadata.version("mcp-agent-memory")
 except importlib.metadata.PackageNotFoundError:  # editable/dev fallback
@@ -692,12 +690,6 @@ class Neo4jAgentMemory:
         # encounters (one session holds many work-units); only the write
         # target ends at the seal.
         self._locus_last: dict[str, str] = {}
-        # Per-locus delta novelty: locus key -> content fingerprints of the
-        # recognitions/conflicts already announced to that session. Announce
-        # a fact-state at first sight, suppress the echo; a changed state
-        # re-announces (see infuse.delta_novelty). Session-scoped, evicted
-        # alongside the other locus state.
-        self._delta_seen: dict[str, set[str]] = {}
         # Per-locus renewal ledger (v0.6.0): locus key -> {node name ->
         # {"fp", "last_full"}} plus a full-mode turn counter. The delivery
         # memory behind the renewal economy: full body at first sight /
@@ -747,18 +739,8 @@ class Neo4jAgentMemory:
             evicted = next(iter(self._locus_last))
             self._locus_last.pop(evicted)
             self._locus_open.pop(evicted, None)
-            self._delta_seen.pop(evicted, None)
             self._delivery_ledger.pop(evicted, None)
             self._locus_turn.pop(evicted, None)
-
-    def _delta_seen_for(self, locus_key: str) -> set[str]:
-        """The locus's announced-delta set, creating it (bounded) on first use."""
-        seen = self._delta_seen.get(locus_key)
-        if seen is None:
-            seen = self._delta_seen[locus_key] = set()
-            while len(self._delta_seen) > self._LOCUS_STATE_MAX:
-                self._delta_seen.pop(next(iter(self._delta_seen)))
-        return seen
 
     def _ledger_for(self, locus_key: str) -> dict[str, dict[str, Any]]:
         """The locus's renewal ledger, creating it (bounded) on first use."""
@@ -1375,11 +1357,10 @@ class Neo4jAgentMemory:
     # Seeds admitted from Match, and the ranked-subgraph size the payload is
     # built from. Small on purpose: the payload is a disposition, not a dump.
     _INFUSE_SEED_LIMIT = 12
-    _INFUSE_DELTA_MATCH_LIMIT = 8
-    # Concept-cluster expansion (v0.7.0, EXPERIMENT-BARLOW B2): matched-band
+    # Concept-cluster expansion (v0.7.0): matched-band
     # reach — nodes one coherence hop from focal-matched Concepts enter the
     # blend at this bias. Fixed this version, deliberately: one new tunable
-    # at a time (per-call override exists for the benchmark's OFF arm).
+    # at a time (a per-call override exists for measuring it off).
     _INFUSE_EXPANSION_BIAS = 0.5
 
     async def _eligible_seeds(self, names: list[str], rel_filter: str) -> list[str]:
@@ -1656,7 +1637,6 @@ class Neo4jAgentMemory:
     async def infuse(
         self,
         text: str,
-        mode: str = "full",
         frontier_bias: float = 0.3,
         max_chars: int = 10_000,
         result_limit: int = 30,
@@ -1676,18 +1656,23 @@ class Neo4jAgentMemory:
         sediment, silent when the substrate has nothing to say. Surfaces —
         never authors; writes no node, no edge; reads only.
 
-        mode='full': the complete disposition — one biased rank computation
-        seeded from focal matches (bias 1.0) blended with the standing
-        frontier (bias frontier_bias), divergence-checked against unbiased
-        mass, conflicts triaged core/parked by constitutive proximity (the
-        biased rank score IS proximity), neighborhood, open threads, temporal
-        trajectory. Delivered with every user prompt.
+        The payload: one biased rank computation seeded from focal matches
+        (bias 1.0) blended with the standing frontier (bias frontier_bias),
+        divergence-checked against unbiased mass, conflicts triaged
+        core/parked by constitutive proximity (the biased rank score IS
+        proximity), neighborhood, open threads, temporal trajectory.
 
-        mode='delta': recognition ("already held: ...") or conflict ("this
-        contradicts what you hold") only — otherwise the empty string, and
-        the hook stays silent. Fired at tool-batch boundaries; no GDS, fast.
-        Attenuation is one failure of the living present; burying the
-        arriving present under sediment after every batch is the other.
+        ONE CHANNEL BY CONSTRUCTION (v0.10.0, subtraction coherence).
+        Infusion is a conflux operation: it has content only where two
+        frames meet. A written prompt crosses a frame boundary — I cannot
+        know what the other holds until the conflux is actualized — so it
+        warrants infusion. A tool return does not: the attention that made
+        the call IS the meaning-making an infusion there would repeat, so
+        the old per-tool-batch 'delta' channel was the substrate handing the
+        agent back what it had just constituted, in a poorer form. It is
+        gone. Whether a given invocation carries a second frame is the
+        CALLER's judgment, declared at the hook (AGENT_MEMORY_INFUSE=auto|on|off),
+        never inferred here.
 
         seed_matches (v0.9.0, the meaning-matcher integration): pre-resolved
         focal-seed candidates from the meaning matcher — the orchestrating
@@ -1697,12 +1682,9 @@ class Neo4jAgentMemory:
         eligible-seed filtering, the frontier bias, B2 expansion, the one
         biased rank, triage, assembly, renewal, delivery — is byte-identical
         either way: the matcher sharpens seed discovery, the governors stay
-        the governance. Delta mode ignores it (the delta channel stays
-        lexical: fast, cheap, per-batch). selection_meta is carried into the
-        result verbatim for the observe log.
+        the governance. selection_meta is carried into the result verbatim
+        for the observe log.
         """
-        if mode not in ("full", "delta"):
-            raise ValueError(f"Unknown infuse mode '{mode}'. Use 'full' or 'delta'.")
         frontier_bias = max(0.0, min(1.0, frontier_bias))
         max_chars = max(500, min(10_000, max_chars))
         timings: dict[str, float] = {}
@@ -1714,21 +1696,14 @@ class Neo4jAgentMemory:
 
         t1 = time.perf_counter()
         matches: list[dict[str, Any]] = []
-        if mode == "full" and seed_matches is not None:
+        if seed_matches is not None:
             matches = seed_matches[: self._INFUSE_SEED_LIMIT]
         elif signals:
             matches = await self._match_focal(
-                lucene_query(signals),
-                self._INFUSE_DELTA_MATCH_LIMIT
-                if mode == "delta"
-                else self._INFUSE_SEED_LIMIT,
+                lucene_query(signals), self._INFUSE_SEED_LIMIT
             )
         timings["match"] = time.perf_counter() - t1
 
-        if mode == "delta":
-            return await self._infuse_delta(
-                seed_terms, matches, max_chars, timings, t0, locus_key
-            )
         result = await self._infuse_full(
             seed_terms, matches, frontier_bias, max_chars, result_limit,
             timings, t0, locus_key,
@@ -1744,108 +1719,6 @@ class Neo4jAgentMemory:
         if selection_meta is not None:
             result["matcher"] = selection_meta
         return result
-
-    async def _infuse_delta(
-        self,
-        seed_terms: list[str],
-        matches: list[dict[str, Any]],
-        max_chars: int,
-        timings: dict[str, float],
-        t0: float,
-        locus_key: str | None = None,
-    ) -> dict[str, Any]:
-        """The tool-batch delta: recognition and conflict against the matched
-        nodes only. Everything matched is focal by construction, so a conflict
-        here is core by definition — but delta computes no rank, so its rows
-        carry NO severity: the contradiction, not a number, is the finding
-        (an amplitude printed here and a different amplitude printed by full
-        mode for the same edge would assert a contradiction of our own).
-
-        Novelty-gated per locus: each recognition/conflict FACT-STATE is
-        announced to a session once, at first sight, then suppressed — the
-        cadence derives from the substrate (first arrival of a fact-state),
-        not the scheduler (batch boundaries), and holds under batch-level
-        (PostToolBatch) or per-call (PostToolUse) harness wiring alike. A
-        changed state is a new first sight and re-announces. Suppression
-        counts are reported; the payload stays honest."""
-        recognitions: list[dict[str, Any]] = []
-        conflicts: list[dict[str, Any]] = []
-        if matches:
-            top_score = matches[0]["score"]
-            strong = [m for m in matches if m["score"] >= 0.6 * top_score][:5]
-            names = [m["name"] for m in strong]
-            anchors = await self.driver.execute_query(
-                "MATCH (e:Encounter)-[:RECORDED|CONSULTED]->(n) "
-                "WHERE n.name IN $names "
-                "RETURN n.name AS name, collect(e.name) AS encounters",
-                {"names": names},
-                routing_=RoutingControl.READ,
-            )
-            anchored = {r["name"]: r["encounters"] for r in anchors.records}
-            recognitions = [
-                {
-                    "name": m["name"],
-                    "type": m["type"],
-                    # Sorted so the novelty content-fingerprint is stable
-                    # against collect() ordering.
-                    "encounters": sorted(anchored.get(m["name"], [])),
-                }
-                for m in strong
-            ]
-            # Progression context (v0.8.0, design of record §4): a recognized
-            # node that belongs to a Component progression arrives tensed —
-            # its subject named, the current terminus named. Attached BEFORE
-            # the novelty gate so the context is part of the fingerprint: a
-            # terminus advance is a new fact-state and re-announces; the
-            # fingerprint discipline prevents droning.
-            prog_ctx = await self.driver.execute_query(
-                "MATCH (n)-[:ABOUT]->(comp:Component) WHERE n.name IN $names "
-                "MATCH (sib)-[:ABOUT]->(comp) "
-                "WHERE labels(sib)[0] IN ['Observation', 'Note'] "
-                "WITH n.name AS name, comp.name AS component, sib "
-                "ORDER BY coalesce(sib.t_observed, sib.t_created) DESC "
-                "WITH name, component, collect(sib.name) AS sibs "
-                "WHERE size(sibs) >= 2 "
-                "RETURN name, component, sibs[0] AS terminus",
-                {"names": names},
-                routing_=RoutingControl.READ,
-            )
-            by_name_prog = {
-                r["name"]: {"component": r["component"], "terminus": r["terminus"]}
-                for r in prog_ctx.records
-            }
-            for r in recognitions:
-                prog = by_name_prog.get(r["name"])
-                if prog:
-                    r["progression"] = prog
-            conflicts = await self._conflicts_among(names)
-
-        suppressed = {"recognitions": 0, "conflicts": 0}
-        if locus_key is not None and (recognitions or conflicts):
-            seen = self._delta_seen_for(locus_key)
-            fresh_r, fresh_c, new_keys = delta_novelty(
-                recognitions, conflicts, seen
-            )
-            suppressed = {
-                "recognitions": len(recognitions) - len(fresh_r),
-                "conflicts": len(conflicts) - len(fresh_c),
-            }
-            recognitions, conflicts = fresh_r, fresh_c
-            seen |= new_keys
-
-        payload = format_delta(recognitions, conflicts, max_chars=max_chars)
-        timings["total"] = time.perf_counter() - t0
-        return {
-            "mode": "delta",
-            "server_version": _SERVER_VERSION,
-            "payload": payload,
-            "silence": payload == "",
-            "seed_terms": seed_terms,
-            "recognitions": recognitions,
-            "conflicts": conflicts,
-            "suppressed": suppressed,
-            "timings_ms": {k: round(v * 1000, 1) for k, v in timings.items()},
-        }
 
     async def _infuse_full(
         self,
@@ -1883,7 +1756,7 @@ class Neo4jAgentMemory:
             frontier_seeds = await self._eligible_seeds(fallback, rel_filter)
         frontier_seeds = [n for n in frontier_seeds if n not in set(focal_seeds)]
 
-        # Concept-cluster expansion (EXPERIMENT-BARLOW B2): siblings one
+        # Concept-cluster expansion: siblings one
         # coherence hop from focal-matched Concepts — the adjacent concept
         # that DID match bridges to the on-point node that could not
         # (measured motivation: the Husserlian correction at 0/19 while its
@@ -2343,8 +2216,8 @@ class Neo4jAgentMemory:
                 fp, all_step_names = prog_fps[comp]
                 commit_progression(ledger, comp, fp, all_step_names, turn)
 
-        # B2b provenance (EXPERIMENT-BARLOW): the pre-committed
-        # focal-dominance check needs to know which delivered bodies arrived
+        # Expansion provenance: the focal-dominance check needs to know
+        # which delivered bodies arrived
         # by focal match and which by concept-cluster expansion. Without it
         # the check is registered but uncomputable — recorded per node as
         # seed-set membership, which is what the B2 benchmark measured.

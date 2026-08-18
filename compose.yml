@@ -67,7 +67,7 @@ services:
 
   agent_memory:
     build: .
-    image: mcp-agent-memory:0.7.0
+    image: mcp-agent-memory:0.8.0
     container_name: agent_memory-mcp
     depends_on:
       neo4j:
@@ -90,10 +90,10 @@ services:
       # deployment file rather than inferred from source. These match the
       # go-forward decision of 2026-07-29 (frontier bias unchanged at 0.3).
       NEO4J_INFUSE_FRONTIER_BIAS: "0.3"
-      # Hand-set until EXPERIMENT-BARLOW B1 places it at the measured knee of
-      # the attenuation curve. Do not tune by feel — that is the whole point.
+      # Hand-set until measurement places it at the knee of the attenuation
+      # curve. Do not tune by feel — that is the whole point.
       NEO4J_INFUSE_REFRESH_TURNS: "10"
-      # The meaning matcher (v0.9.0) — infuse's full-mode seed source
+      # The meaning matcher (v0.9.0) — infuse's seed source
       # (measured in at T0: recall 7/8 vs the 2/8 lexical baseline,
       # trajectory +2). GEMINI_API_KEY rides in from .env (compose
       # auto-loads it); no key -> infuse falls back to the lexical

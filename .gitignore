@@ -35,3 +35,6 @@ publish/.staging/
 publish/.target
 *.pdf
 EXPERIENCE_HOWTO.xml
+
+# macOS Finder metadata — never part of a release
+.DS_Store

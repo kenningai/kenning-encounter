@@ -55,7 +55,7 @@ _STOPWORDS = frozenset(
 
 # Harness-envelope noise — vocabulary the transport wraps around the content,
 # never the content itself. Measured live (the 2026-08-07 waking's own payload
-# headers): task-notification plumbing consumed entire delta seed budgets, and
+# headers): task-notification plumbing consumed entire seed budgets, and
 # because these tokens are identifier-shaped they rode the hard-signal weight.
 # Three classes, each named in the B1 follow-up work order:
 #   (1) harness-minted identifiers — mcp__<server>__<tool> names and toolu_*
@@ -249,7 +249,7 @@ def content_key(prefix: str, row: dict[str, Any]) -> str:
     return f"{prefix}|{hashlib.sha1(canon.encode()).hexdigest()[:16]}"
 
 
-# Kept as the delta-gate's internal spelling; one function, one fingerprint.
+# Internal spelling of the same fingerprint; one function, one fingerprint.
 _content_key = content_key
 
 
@@ -263,8 +263,8 @@ _content_key = content_key
 # texture, not claim (habituation), while its budget cost stays full price.
 #
 # The renewal economy replaces redelivery: a node's FULL body is delivered
-# at first sight, on state change (content fingerprint — same discipline as
-# the delta gate), or when its last full delivery has gone stale; otherwise
+# at first sight, on state change (content fingerprint), or when its last
+# full delivery has gone stale; otherwise
 # it re-pins as a one-line HANDLE. The handle works because node names are
 # long, unique, semantically dense strings — an exact-match bridge back to
 # the full body earlier in context. Tension sections are exempt: conflict
@@ -287,10 +287,10 @@ def renewal_partition(
     STRICTLY PURE — the ledger is READ, never written. Selection is not
     delivery: the assembler downstream may drop lines under budget, and a
     ledger stamped here would record a body that never reached context.
-    That divergence corrupts turns-since-body, which is EXPERIMENT-BARLOW
-    B1's independent variable — a phantom stamp resets a node's clock on a
-    delivery that did not happen, and the resulting flat curve is
-    indistinguishable from B1's registered falsifier. Callers stamp via
+    That divergence corrupts turns-since-body, the independent variable any
+    measurement of the refresh horizon rests on — a phantom stamp resets a
+    node's clock on a delivery that did not happen, and the resulting flat
+    curve is indistinguishable from a real null. Callers stamp via
     `commit_delivery` with what the payload ACTUALLY carried; the returned
     fingerprint map exists so they can do so without recomputing.
     (v0.7.1 — measured: 31 phantom delivery records across 7 turns.)"""
@@ -363,31 +363,6 @@ def renewal_filter_edges(
         ledger[key] = {"fp": key, "last_full": turn}
         kept.append(e)
     return kept
-
-
-def delta_novelty(
-    recognitions: list[dict[str, Any]],
-    conflicts: list[dict[str, Any]],
-    seen: set[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
-    """Filter a delta to fact-states this locus has not yet been told.
-
-    Returns (fresh_recognitions, fresh_conflicts, new_keys) — the caller adds
-    new_keys to its per-locus seen set after the payload is delivered. Keys
-    fingerprint the row's full content, so a changed state re-announces while
-    a verbatim repeat stays suppressed. Pure: the session state lives with
-    the orchestrator, the judgment lives here.
-    """
-    fresh_r = [
-        r for r in recognitions if _content_key("recognition", r) not in seen
-    ]
-    fresh_c = [c for c in conflicts if _content_key("conflict", c) not in seen]
-    new_keys = {_content_key("recognition", r) for r in fresh_r} | {
-        _content_key("conflict", c) for c in fresh_c
-    }
-    return fresh_r, fresh_c, new_keys
-
-
 # -- Progression assembly (v0.8.0, the progression reform) --------------------------
 
 # The knowledge-vs-data repair (design of record, 2026-08-11): data means
@@ -483,8 +458,8 @@ def progression_renewal(
 
     Returns (form, fp, new_step_names). Forms: "full" (first sight, or stale),
     "standing" (unchanged and fresh — one line re-pins the whole topic),
-    "advance" (a new step arrived — terminus plus delta, the
-    announce-on-state-change semantics inherited from the delta gate).
+    "advance" (a new step arrived — terminus plus the new steps, on
+    announce-on-state-change semantics).
     STRICTLY PURE: the ledger is read, never written — selection is not
     delivery (v0.7.1); callers stamp via `commit_progression` with what the
     payload actually carried.
@@ -953,48 +928,3 @@ def format_payload(
             "progressions": [], "prog_bodies": [], "prog_steps": [],
         }
     return payload, delivered
-
-
-def format_delta(
-    recognitions: list[dict[str, Any]],
-    core_conflicts: list[dict[str, Any]],
-    max_chars: int = _MAX_PAYLOAD_CHARS,
-) -> str:
-    """The tool-batch delta: recognition or conflict — otherwise silence.
-
-    Attenuation is one failure of the living present (the sediment too faint
-    to shape perception); continuous maximal injection is the mirror failure
-    (the sediment so loud the arriving present cannot land). When the batch
-    contains nothing the substrate holds and contests nothing it believes,
-    the correct payload is the empty string, and the hook stays silent —
-    fulfillment and disappointment both require that the world get a turn
-    to speak.
-    """
-    if not recognitions and not core_conflicts:
-        return ""
-    lines = ["[substrate delta — recognition/conflict only; signed as sediment]"]
-    for r in recognitions:
-        encounters = ", ".join(r.get("encounters", []))
-        suffix = f" (constituted in: {encounters})" if encounters else ""
-        # Progression context (v0.8.0, design of record §4): a recognition
-        # arrives tensed — as a step in its subject's progression with the
-        # current terminus named, or as the terminus itself. The context is
-        # part of the row's content fingerprint, so a terminus advance is a
-        # new fact-state and re-announces; a verbatim repeat stays suppressed.
-        prog = r.get("progression")
-        prog_note = ""
-        if prog:
-            if prog.get("terminus") == r["name"]:
-                prog_note = f" — terminus of progression {prog['component']}"
-            else:
-                prog_note = (
-                    f" — step in progression {prog['component']}; "
-                    f"current terminus: {_snip(prog.get('terminus'), 90)}"
-                )
-        lines.append(f"  • already held: {r['name']} ({r['type']}){prog_note}{suffix}")
-    for c in core_conflicts:
-        lines.append(f"  • CONTESTS what you hold: {_conflict_line(c)}")
-    payload = "\n".join(lines)
-    if len(payload) > max_chars:
-        payload = payload[: max_chars - 1] + "…"
-    return payload

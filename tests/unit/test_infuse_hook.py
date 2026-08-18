@@ -33,18 +33,18 @@ hook = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hook)
 
 
-class TestFullModeGate:
+class TestInfusionSwitch:
     """Pure decision function — no network, no harness."""
 
     def test_interactive_cli_is_allowed(self):
-        allowed, why = hook.full_mode_allowed({"CLAUDE_CODE_ENTRYPOINT": "cli"})
+        allowed, why = hook.infusion_allowed({"CLAUDE_CODE_ENTRYPOINT": "cli"})
         assert allowed is True
         assert "interactive" in why
 
     def test_headless_print_mode_is_blocked(self):
         # `claude -p` — the scheduled/cron shape. This is the case the gate
         # was built for.
-        allowed, why = hook.full_mode_allowed({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"})
+        allowed, why = hook.infusion_allowed({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"})
         assert allowed is False
         assert "monologue" in why
 
@@ -53,29 +53,29 @@ class TestFullModeGate:
         # must lose injection, never gain an unbounded permanent core.
         for env in ({}, {"CLAUDE_CODE_ENTRYPOINT": "sdk-py"},
                     {"CLAUDE_CODE_ENTRYPOINT": "some-future-runner"}):
-            allowed, _ = hook.full_mode_allowed(env)
+            allowed, _ = hook.infusion_allowed(env)
             assert allowed is False, f"{env} must degrade to silence"
 
     def test_operator_override_forces_on(self):
-        allowed, why = hook.full_mode_allowed(
-            {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "AGENT_MEMORY_INFUSE_FULL": "always"})
-        assert allowed is True and why == "policy=always"
+        allowed, why = hook.infusion_allowed(
+            {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "AGENT_MEMORY_INFUSE": "on"})
+        assert allowed is True and why == "switch=on"
 
     def test_operator_override_forces_off(self):
-        allowed, why = hook.full_mode_allowed(
-            {"CLAUDE_CODE_ENTRYPOINT": "cli", "AGENT_MEMORY_INFUSE_FULL": "never"})
-        assert allowed is False and why == "policy=never"
+        allowed, why = hook.infusion_allowed(
+            {"CLAUDE_CODE_ENTRYPOINT": "cli", "AGENT_MEMORY_INFUSE": "off"})
+        assert allowed is False and why == "switch=off"
 
     def test_reason_is_returned_on_both_paths(self):
         # The reason string is not decoration: it is what lands in the
         # observation stream and makes a suppression legible.
         for env in ({"CLAUDE_CODE_ENTRYPOINT": "cli"},
                     {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}):
-            _, why = hook.full_mode_allowed(env)
+            _, why = hook.infusion_allowed(env)
             assert why and isinstance(why, str)
 
 
-def _run(mode, env_extra, tmp_path, stdin_obj):
+def _run(env_extra, tmp_path, stdin_obj):
     """Invoke the hook as the harness does: JSON on stdin, env, exit code."""
     import os
     log = tmp_path / "observe.jsonl"
@@ -84,7 +84,7 @@ def _run(mode, env_extra, tmp_path, stdin_obj):
     env.update(env_extra)
     env["AGENT_MEMORY_INFUSE_OBSERVE_LOG"] = str(log)
     proc = subprocess.run(
-        [sys.executable, str(_SCRIPT), "--mode", mode,
+        [sys.executable, str(_SCRIPT),
          "--url", "http://127.0.0.1:59999/api/mcp/", "--timeout", "1"],
         input=json.dumps(stdin_obj), capture_output=True, text=True, env=env,
     )
@@ -99,7 +99,7 @@ class TestGateEndToEnd:
              "prompt": "You are waking. Run your EERRS cycle."}
 
     def test_blocked_call_is_silent_to_harness_but_recorded(self, tmp_path):
-        proc, recs = _run("full", {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"},
+        proc, recs = _run({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"},
                           tmp_path, self.STDIN)
         assert proc.returncode == 0
         assert proc.stdout == ""            # nothing reaches the agent
@@ -115,26 +115,29 @@ class TestGateEndToEnd:
         # decide first, so a blocked scheduled run costs nothing.
         import time
         t0 = time.monotonic()
-        proc, _ = _run("full", {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"},
+        proc, _ = _run({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"},
                        tmp_path, self.STDIN)
         assert proc.returncode == 0
         assert time.monotonic() - t0 < 1.0
 
-    def test_delta_is_never_gated(self, tmp_path):
-        # Delta carries the agent's own unfolding and is the ONLY channel a
-        # scheduled run has. Gating it would disable infusion entirely there.
-        proc, recs = _run("delta", {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}, tmp_path,
-                          {"session_id": "s1", "hook_event_name": "PostToolUse",
-                           "tool_response": {"text": "the VIP distributes to node-02"}})
+    def test_switch_on_reaches_a_headless_run(self, tmp_path):
+        # The gate keys on the HARNESS (entrypoint), which is a proxy for
+        # "a second frame is present" — good for the human case, blind to
+        # any other. A headless run whose prompt is ANOTHER AGENT's message
+        # does cross a frame boundary, and the caller is the only party that
+        # knows it. AGENT_MEMORY_INFUSE=on is how that judgment is declared; without
+        # this the sibling channel would be silenced by the cron proxy.
+        proc, recs = _run({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli",
+                           "AGENT_MEMORY_INFUSE": "on"}, tmp_path, self.STDIN)
         assert proc.returncode == 0
         assert not any(r.get("skipped") for r in recs), \
-            "delta must not be gated by entrypoint"
+            "a declared second frame must not be gated by the harness proxy"
 
     def test_interactive_full_is_not_skipped(self, tmp_path):
         # It will still fail to reach the closed port and fail silent, but it
         # must NOT be recorded as gate-skipped — the distinction between
         # 'suppressed by policy' and 'server unreachable' has to survive.
-        proc, recs = _run("full", {"CLAUDE_CODE_ENTRYPOINT": "cli"},
+        proc, recs = _run({"CLAUDE_CODE_ENTRYPOINT": "cli"},
                           tmp_path, self.STDIN)
         assert proc.returncode == 0
         assert not any(r.get("skipped") for r in recs)
@@ -183,3 +186,55 @@ class TestUserTurns:
         p = tmp_path / "garbage.jsonl"
         p.write_text("not json at all\n{broken")
         assert hook._user_turns(str(p), 3) == []
+
+
+class TestStaleWiringCannotBlockTheTurn:
+    """A settings.json written against an older version must not wedge the harness.
+
+    argparse exits 2 on an unknown flag, and 2 is the harness's BLOCKING exit
+    code for UserPromptSubmit. A `--mode full` left over from the two-channel
+    era therefore did not degrade to silence — it blocked every prompt in the
+    session. Found live on the author's own machine, which is exactly where
+    the portability defects keep being found.
+    """
+
+    STDIN = {"session_id": "s1", "hook_event_name": "UserPromptSubmit",
+             "prompt": "a written prompt from another frame"}
+
+    def _run_argv(self, extra_argv, env_extra, tmp_path):
+        import os
+        log = tmp_path / "observe.jsonl"
+        env = dict(os.environ)
+        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+        env.update(env_extra)
+        env["AGENT_MEMORY_INFUSE_OBSERVE_LOG"] = str(log)
+        proc = subprocess.run(
+            [sys.executable, str(_SCRIPT), *extra_argv,
+             "--url", "http://127.0.0.1:59999/api/mcp/", "--timeout", "1"],
+            input=json.dumps(self.STDIN), capture_output=True, text=True, env=env,
+        )
+        recs = []
+        if log.exists():
+            recs = [json.loads(x) for x in log.read_text().splitlines() if x.strip()]
+        return proc, recs
+
+    def test_retired_mode_flag_does_not_block(self, tmp_path):
+        proc, _ = self._run_argv(
+            ["--mode", "full"], {"CLAUDE_CODE_ENTRYPOINT": "cli"}, tmp_path)
+        assert proc.returncode == 0, (
+            "exit 2 is the harness's blocking code — a stale flag must never "
+            f"reach it (stderr: {proc.stderr!r})")
+
+    def test_unparseable_flag_does_not_block(self, tmp_path):
+        proc, _ = self._run_argv(
+            ["--timeout", "not-a-number"], {"CLAUDE_CODE_ENTRYPOINT": "cli"}, tmp_path)
+        assert proc.returncode == 0
+
+    def test_the_ignored_flag_is_recorded_not_swallowed(self, tmp_path):
+        # Gated path so the record lands without a live server.
+        proc, recs = self._run_argv(
+            ["--mode", "delta"], {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}, tmp_path)
+        assert proc.returncode == 0
+        assert recs, "the call must still be observable"
+        assert recs[0]["unknown_args"] == ["--mode", "delta"], \
+            "a swallowed flag is indistinguishable from a broken guard"

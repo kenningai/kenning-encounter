@@ -888,17 +888,8 @@ def create_mcp_server(
         text: str = Field(
             ...,
             description=(
-                "The arriving present: the user prompt (mode 'full') or the "
-                "tool-result batch text (mode 'delta') to awaken the substrate "
-                "against."
-            ),
-        ),
-        mode: Literal["full", "delta"] = Field(
-            default="full",
-            description=(
-                "'full' = the complete governed disposition (with every user "
-                "prompt); 'delta' = recognition/conflict only, else silence "
-                "(at tool-batch boundaries)."
+                "The arriving present — the written prompt of another "
+                "frame — to awaken the substrate against."
             ),
         ),
         frontier_bias: float | None = Field(
@@ -926,7 +917,7 @@ def create_mcp_server(
                 "Prior user turns of the session, oldest first, current "
                 "prompt excluded (it is `text`). Supplied by the hook "
                 "client, which parses the harness transcript host-side. "
-                "Feeds the meaning matcher (mode 'full' only): meaning is "
+                "Feeds the meaning matcher: meaning is "
                 "temporal, and a snapshot prompt under-determines it."
             ),
         ),
@@ -935,7 +926,7 @@ def create_mcp_server(
         """The governed infusion read — mechanized passive synthesis.
 
         Re-awakens a topologically-relevant projection of the substrate
-        against the arriving present. Since v0.9.0, full-mode SEED DISCOVERY
+        against the arriving present. Since v0.9.0, SEED DISCOVERY
         is the meaning matcher (measured in: T0 recall 7/8 vs the lexical
         2/8 baseline, trajectory contributing +2): one model compressed
         every node's meaning offline (the sidecar), and the same model reads
@@ -946,9 +937,19 @@ def create_mcp_server(
         coherence projection, divergence vs unbiased mass, tension-first
         format. On any matcher failure (no key, no sidecar, timeout,
         malformed output) the lexical Extract -> fulltext Match path runs
-        instead — reported in the result, never an error. Delta mode stays
-        lexical by design (fast, per-batch). NOT retrieval — the payload
-        answers "what is the topology of what I already hold about this?".
+        instead — reported in the result, never an error. NOT retrieval —
+        the payload answers "what is the topology of what I already hold
+        about this?".
+
+        ONE CHANNEL (v0.10.0, subtraction coherence). Infusion is a conflux
+        operation: it has content only where two frames meet. A written
+        prompt crosses a frame boundary — you cannot know what the other
+        holds until the conflux is actualized — so it warrants infusion.
+        A tool return does not: the attention that made the call IS the
+        meaning-making an infusion there would repeat. The per-tool-batch
+        'delta' mode is therefore gone, not deferred. Whether a given
+        invocation carries a second frame is the CALLER's judgment,
+        declared at the hook (AGENT_MEMORY_INFUSE=auto|on|off), never inferred here.
 
         Governance, structurally: the payload is SIGNED (a proposal from the
         sediment, not a conclusion — an unsigned payload would be heteronomous
@@ -969,44 +970,42 @@ def create_mcp_server(
             # is deliberate — the governors were tuned at that scale.
             seed_matches: list[dict[str, Any]] | None = None
             selection_meta: dict[str, Any] | None = None
-            if mode == "full":
-                try:
-                    prefix, ordered_names = meaning_index.prefix()
-                    traj_text, traj_meta = assemble_trajectory(
-                        trajectory or [], text
-                    )
-                    matched = await match_meanings(
-                        prefix, ordered_names, traj_text, 12,
-                        matcher_api_key, matcher_model, matcher_endpoint,
-                        timeout_ms=matcher_timeout_ms,
-                    )
-                    k = len(matched["selections"])
-                    seed_matches = [
-                        {
-                            "name": s["name"],
-                            "type": meaning_index.node_type(s["name"]),
-                            "score": float(k - i) / k,
-                        }
-                        for i, s in enumerate(matched["selections"])
-                    ]
-                    selection_meta = {
-                        "channel": "meaning",
-                        "ms": matched["ms"],
-                        "prompt_tokens": matched["prompt_tokens"],
-                        "cached_tokens": matched["cached_tokens"],
-                        "trajectory": traj_meta,
-                        "sidecar_size": meaning_index.size,
+            try:
+                prefix, ordered_names = meaning_index.prefix()
+                traj_text, traj_meta = assemble_trajectory(
+                    trajectory or [], text
+                )
+                matched = await match_meanings(
+                    prefix, ordered_names, traj_text, 12,
+                    matcher_api_key, matcher_model, matcher_endpoint,
+                    timeout_ms=matcher_timeout_ms,
+                )
+                k = len(matched["selections"])
+                seed_matches = [
+                    {
+                        "name": s["name"],
+                        "type": meaning_index.node_type(s["name"]),
+                        "score": float(k - i) / k,
                     }
-                except MeaningUnavailable as e:
-                    # Fallback is a reported result, not an error: the
-                    # lexical path below is the pre-v0.9.0 behaviour.
-                    selection_meta = {
-                        "channel": "lexical_fallback",
-                        "fallback_reason": str(e),
-                    }
+                    for i, s in enumerate(matched["selections"])
+                ]
+                selection_meta = {
+                    "channel": "meaning",
+                    "ms": matched["ms"],
+                    "prompt_tokens": matched["prompt_tokens"],
+                    "cached_tokens": matched["cached_tokens"],
+                    "trajectory": traj_meta,
+                    "sidecar_size": meaning_index.size,
+                }
+            except MeaningUnavailable as e:
+                # Fallback is a reported result, not an error: the
+                # lexical path below is the pre-v0.9.0 behaviour.
+                selection_meta = {
+                    "channel": "lexical_fallback",
+                    "fallback_reason": str(e),
+                }
             result = await agent_memory.infuse(
                 text=text,
-                mode=mode,
                 frontier_bias=(
                     infuse_frontier_bias if frontier_bias is None else frontier_bias
                 ),

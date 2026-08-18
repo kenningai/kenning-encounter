@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """Reference hook client for the governed infusion pipeline.
 
-Wires a Claude Code harness to the Agent Memory server's `infuse` tool at the two
-per-turn injection points (the once-per-waking orientation read stays with
-the SessionStart re-entry hook):
+Wires a Claude Code harness to the Agent Memory server's `infuse` tool at the ONE
+injection point it has (the once-per-waking orientation read stays with the
+SessionStart re-entry hook):
 
-  UserPromptSubmit  ->  mode 'full'   (the complete governed disposition,
-                                       alongside every prompt)
-  PostToolBatch     ->  mode 'delta'  (recognition/conflict only; silence
-                                       is a valid injection; fires once per
-                                       parallel batch, before the next
-                                       model call)
+  UserPromptSubmit  ->  the complete governed disposition, alongside a
+                        prompt that carries another frame's meaning.
 
-On a harness or SDK without PostToolBatch (e.g. the Python Agent SDK),
-wire the delta to PostToolUse instead: the server's per-locus novelty gate
-keeps the same at-most-once-per-fact-state semantics either way — the
-cadence derives from the substrate, not the scheduler.
+ONE CHANNEL, BY CONSTRUCTION (v0.10.0, subtraction coherence). Infusion is
+a conflux operation: it has content only where two frames meet. A written
+prompt crosses a frame boundary — the agent cannot know what the other
+holds, or what it means against what it already holds, until the conflux is
+actualized. A TOOL RETURN CROSSES NO SUCH BOUNDARY: the agent made that call
+because something in its own frontier caught its attention, so the
+meaning-making an infusion there would perform has already happened, a
+priori the call. The old per-tool-batch 'delta' channel handed the agent
+back what it had itself just constituted, in a poorer form; worse, its
+silence was unreadable (no-conflict and lexical-miss were byte-identical at
+a measured ~75% miss rate), so it manufactured the confidence it existed to
+prevent. It is gone, not deferred.
 
 Example .claude/settings.json wiring (use an ABSOLUTE interpreter path: hook
 processes do not inherit an interactive shell PATH, and a bare `python3` can
@@ -24,9 +28,7 @@ resolve to an ancient system interpreter):
   {
     "hooks": {
       "UserPromptSubmit": [{ "hooks": [{ "type": "command",
-        "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py --mode full" }] }],
-      "PostToolBatch": [{ "hooks": [{ "type": "command",
-        "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py --mode delta" }] }]
+        "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py" }] }]
     }
   }
 
@@ -49,7 +51,7 @@ payload, seed_mode, counts, suppression, timings — is appended as one JSON
 line to AGENT_MEMORY_INFUSE_SHADOW_LOG (default ~/.claude/agent_memory-infuse-shadow.jsonl)
 and stdout stays empty. This is the zero-constitutive-risk dress rehearsal:
 run the wired hooks in shadow for a few wakings against the live substrate
-to observe seed quality, delta fire rate, real-graph latency, and the
+to observe seed quality, real-graph latency, and the
 parked-tensions register at scale, BEFORE the first governed payload is
 allowed to condition a live write.
 
@@ -58,8 +60,8 @@ injected or silent — appends the same full record (plus an `injected`
 flag) to <path>, independent of shadow mode. This is the out-of-band
 measurement stream for the infusion experiment: the harness transcript
 already records what was injected (additionalContext is saved into the
-session transcript), but only this log records the silences — suppressed
-deltas, silent full calls, timings, suppression counts — and silence is a
+session transcript), but only this log records the silences — gated calls,
+silent calls, timings, suppression counts — and silence is a
 measured variable. PROTOCOL: the observed subject must never read this
 file; a subject reading its own measurement stream contaminates the
 measures. Keep it outside the project tree; analysis is the observer's.
@@ -111,17 +113,16 @@ SHADOW_LOG = os.environ.get(
 OBSERVE_LOG = os.environ.get("AGENT_MEMORY_INFUSE_OBSERVE_LOG")  # unset = no observation
 
 # ---------------------------------------------------------------------------
-# Full-mode gating: a prompt injection belongs to a prompt somebody WROTE.
+# The switch: infusion belongs to a prompt somebody WROTE.
 #
 # THE PARADIGM SPLIT, measured on a live headless agent (2026-08-07). In an
 # interactive session each prompt carries new intentionality from a second
 # party, which is exactly what the per-prompt injection point is for. A
 # scheduled run is a MONOLOGUE: one fixed trigger string, then autonomous
-# work. There is no second party, so the per-prompt point has nothing to
-# carry — the only place new content enters is tool results, which is the
-# delta channel's job.
+# work. There is no second party, so no frame boundary is crossed and the
+# injection point has nothing to carry.
 #
-# Left ungated, full mode in a scheduled run is not merely noisy, it builds
+# Left ungated, infusion in a scheduled run is not merely noisy, it builds
 # a gravity well. The trigger is byte-identical every waking, so Extract
 # yields identical seeds forever; the renewal ledger is session-scoped and a
 # waking IS a session, so the ledger is cold every time and the same bodies
@@ -136,13 +137,24 @@ OBSERVE_LOG = os.environ.get("AGENT_MEMORY_INFUSE_OBSERVE_LOG")  # unset = no ob
 # enumerating headless runners we cannot know) means an unrecognised harness
 # degrades toward SILENCE, never toward drone — the safe direction, and the
 # design's own "silence is a valid injection" principle applied one level
-# earlier. Operators whose harness we misclassify have an explicit override.
+# earlier.
+#
+# AGENT_MEMORY_INFUSE is a SWITCH, not a mode — there is only one thing to infuse:
+#   auto (default) — the entrypoint gate above: on for a written prompt,
+#                    off for a scheduled trigger.
+#   on             — infuse regardless. For an invocation the operator KNOWS
+#                    carries a second frame but whose harness we misread:
+#                    an unrecognised runner, or a run whose prompt is another
+#                    agent's message rather than a cron string.
+#   off            — never infuse.
+# The switch says WHETHER; the recorded skip_reason says WHY. Per-process by
+# construction, so the same deployment can answer differently per invocation.
 INTERACTIVE_ENTRYPOINTS = frozenset({"cli"})
-FULL_MODE_POLICY = os.environ.get("AGENT_MEMORY_INFUSE_FULL", "interactive").lower()
+INFUSE_SWITCH = os.environ.get("AGENT_MEMORY_INFUSE", "auto").lower()
 
 
-def full_mode_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
-    """(allowed, reason) for a full-mode call under the current harness.
+def infusion_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """(allowed, reason) for an infusion call under the current harness.
 
     Returns the reason either way so the observation stream can record WHY a
     call was skipped. A guard that suppresses silently is indistinguishable
@@ -150,11 +162,11 @@ def full_mode_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
     three times, and the observe log is where it gets caught.
     """
     env = os.environ if env is None else env
-    policy = (env.get("AGENT_MEMORY_INFUSE_FULL", FULL_MODE_POLICY) or "interactive").lower()
-    if policy == "always":
-        return True, "policy=always"
-    if policy == "never":
-        return False, "policy=never"
+    switch = (env.get("AGENT_MEMORY_INFUSE", INFUSE_SWITCH) or "auto").lower()
+    if switch == "on":
+        return True, "switch=on"
+    if switch == "off":
+        return False, "switch=off"
     entrypoint = env.get("CLAUDE_CODE_ENTRYPOINT", "")
     if not entrypoint:
         return False, "no CLAUDE_CODE_ENTRYPOINT — harness unrecognised, degrading to silence"
@@ -208,7 +220,7 @@ def _initialize(url: str) -> str | None:
             "params": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "agent_memory-infuse-hook", "version": "0.9.0"},
+                "clientInfo": {"name": "agent_memory-infuse-hook", "version": "0.10.0"},
             },
         },
         None,
@@ -219,10 +231,10 @@ def _initialize(url: str) -> str | None:
 
 
 def _call_infuse(
-    url: str, sid: str, text: str, mode: str,
+    url: str, sid: str, text: str,
     trajectory: list[str] | None = None,
 ) -> dict:
-    arguments: dict = {"text": text, "mode": mode}
+    arguments: dict = {"text": text}
     if trajectory:
         arguments["trajectory"] = trajectory
     msg, _ = _post(
@@ -284,15 +296,9 @@ def _user_turns(transcript_path: str, n: int) -> list[str]:
     return turns[-n:]
 
 
-def _focal_text(hook_input: dict, mode: str) -> str:
-    event = hook_input.get("hook_event_name", "")
-    if event == "UserPromptSubmit" or mode == "full":
-        return str(hook_input.get("prompt", ""))
-    # Tool-batch shapes: single response (PostToolUse) or a batch list.
-    for key in ("tool_responses", "tool_response", "tool_result"):
-        if key in hook_input:
-            return json.dumps(hook_input[key], default=str)[:8000]
-    return ""
+def _focal_text(hook_input: dict) -> str:
+    """The arriving present: the prompt, and only ever the prompt."""
+    return str(hook_input.get("prompt", ""))
 
 
 def _append_log(path: str, record: dict) -> None:
@@ -305,10 +311,27 @@ def _append_log(path: str, record: dict) -> None:
         pass
 
 
+class _SilentParser(argparse.ArgumentParser):
+    """argparse that cannot block the turn.
+
+    THE HOLE THIS CLOSES, found live: argparse exits 2 on a bad or unknown
+    flag, and 2 is exactly the harness's BLOCKING exit code for
+    UserPromptSubmit — so a stale `--mode full` in a settings.json left over
+    from the two-channel era did not degrade to silence, it wedged the
+    session ("UserPromptSubmit operation blocked by hook") for every prompt
+    until someone edited the file. The hook's own stated invariant is FAIL
+    SILENT: any error -> exit 0, no output. argparse ran before any of the
+    handling that honours it. It no longer can.
+    """
+
+    def error(self, message: str):
+        sys.stderr.write(f"agent_memory-infuse-hook: {message}\n")
+        raise SystemExit(0)
+
+
 def main() -> int:
     global TIMEOUT_S
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["full", "delta"], default="full")
+    parser = _SilentParser()
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument(
         "--timeout", type=float, default=None,
@@ -319,7 +342,11 @@ def main() -> int:
         "--shadow", action="store_true",
         help="Compute and log the infusion, inject nothing.",
     )
-    args = parser.parse_args()
+    # Unknown flags are IGNORED, never fatal — a wiring written against an
+    # older version must not wedge the harness. But they are RECORDED with
+    # the call (below), because a guard that swallows silently is
+    # indistinguishable from a guard that is broken.
+    args, unknown_args = parser.parse_known_args()
     if args.timeout is not None:
         TIMEOUT_S = args.timeout
 
@@ -327,33 +354,32 @@ def main() -> int:
 
     # Gate full mode BEFORE any network call: a scheduled run's trigger is a
     # ritual string, and infusing on it drones a permanent core (see
-    # full_mode_allowed). The skip is RECORDED, never silent — an invisible
+    # infusion_allowed). The skip is RECORDED, never silent — an invisible
     # guard is the failure mode this whole apparatus keeps rediscovering.
-    if args.mode == "full":
-        allowed, why = full_mode_allowed()
-        if not allowed:
-            if OBSERVE_LOG:
-                _append_log(OBSERVE_LOG, {
-                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    "session_id": str(hook_input.get("session_id", "")),
-                    "event": hook_input.get("hook_event_name", ""),
-                    "mode": args.mode,
-                    "injected": False,
-                    "skipped": True,
-                    "skip_reason": why,
-                })
-            return 0
+    allowed, why = infusion_allowed()
+    if not allowed:
+        if OBSERVE_LOG:
+            _append_log(OBSERVE_LOG, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "session_id": str(hook_input.get("session_id", "")),
+                "event": hook_input.get("hook_event_name", ""),
+                "injected": False,
+                "skipped": True,
+                "skip_reason": why,
+                "unknown_args": unknown_args,
+            })
+        return 0
 
-    text = _focal_text(hook_input, args.mode)
+    text = _focal_text(hook_input)
     if not text.strip():
         return 0
 
-    # Trajectory for full mode: the last N user turns before this prompt,
+    # Trajectory: the last N user turns before this prompt,
     # parsed host-side from the harness transcript. The transcript's tail
     # usually IS this prompt — drop the duplicate so the server sees the
     # current prompt exactly once, last.
     trajectory: list[str] = []
-    if args.mode == "full" and TRAJECTORY_TURNS > 0:
+    if TRAJECTORY_TURNS > 0:
         tpath = str(hook_input.get("transcript_path", "") or "")
         if tpath:
             trajectory = _user_turns(tpath, TRAJECTORY_TURNS + 1)
@@ -376,7 +402,7 @@ def main() -> int:
     try:
         try:
             result = (
-                _call_infuse(args.url, sid, text, args.mode, trajectory)
+                _call_infuse(args.url, sid, text, trajectory)
                 if sid else {}
             )
             if not sid:
@@ -386,7 +412,7 @@ def main() -> int:
             sid = _initialize(args.url)
             if not sid:
                 raise RuntimeError("initialize failed")
-            result = _call_infuse(args.url, sid, text, args.mode, trajectory)
+            result = _call_infuse(args.url, sid, text, trajectory)
     except Exception as exc:
         # Fail silent toward the harness — but the observation stream records
         # the attempt. An unlogged failure is what made the positional join
@@ -396,7 +422,6 @@ def main() -> int:
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "session_id": str(hook_input.get("session_id", "")),
                 "event": hook_input.get("hook_event_name", ""),
-                "mode": args.mode,
                 "prompt_sha": psha,
                 "error": type(exc).__name__,
             })
@@ -412,7 +437,7 @@ def main() -> int:
         "session_id": str(hook_input.get("session_id", "")),
         "event": hook_input.get("hook_event_name", ""),
         "prompt_sha": psha,
-        "mode": result.get("mode", args.mode),
+        "unknown_args": unknown_args,
         "silence": result.get("silence"),
         "seed_mode": result.get("seed_mode"),
         "rank_mode": result.get("rank_mode"),
@@ -420,9 +445,9 @@ def main() -> int:
         "counts": result.get("counts"),
         "suppressed": result.get("suppressed"),
         "renewal": result.get("renewal"),
-        # v0.8.0 (EXPERIMENT-BARLOW A9): the assembly accounting — selected /
-        # assembled / delivered plus the blind-spot log — and the server
-        # version, the seam marker B1 stratifies on across the progression
+        # v0.8.0: the assembly accounting — selected / assembled /
+        # delivered plus the blind-spot log — and the server version, the
+        # seam marker any analysis must stratify on across the progression
         # cutover. Absent on pre-0.8.0 servers; .get keeps old servers clean.
         "assembly": result.get("assembly"),
         "server_version": result.get("server_version"),

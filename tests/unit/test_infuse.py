@@ -12,9 +12,7 @@ import pytest
 from mcp_agent_memory.agent_memory import Neo4jAgentMemory, frontier_seed_candidates, validate_entity
 from mcp_agent_memory.infuse import (
     commit_progression,
-    delta_novelty,
     extract_focal_signals,
-    format_delta,
     commit_delivery,
     format_payload,
     format_progression,
@@ -193,68 +191,6 @@ class TestTriage:
 
 # -- Delta novelty ----------------------------------------------------------------
 
-class TestDeltaNovelty:
-    R1 = {"name": "node-A", "type": "Observation", "encounters": ["E1"]}
-    R2 = {"name": "node-B", "type": "Concept", "encounters": []}
-    C1 = {"kind": "challenge", "from_name": "obs-X", "to_name": "hyp-Y"}
-
-    def test_first_sight_passes_everything(self):
-        fresh_r, fresh_c, new_keys = delta_novelty([self.R1, self.R2], [self.C1], set())
-        assert fresh_r == [self.R1, self.R2] and fresh_c == [self.C1]
-        assert len(new_keys) == 3
-
-    def test_repeat_is_suppressed(self):
-        seen: set[str] = set()
-        _, _, keys = delta_novelty([self.R1, self.R2], [self.C1], seen)
-        seen |= keys
-        fresh_r, fresh_c, new_keys = delta_novelty([self.R1, self.R2], [self.C1], seen)
-        assert fresh_r == [] and fresh_c == [] and new_keys == set()
-
-    def test_new_item_still_fires_among_repeats(self):
-        seen: set[str] = set()
-        _, _, keys = delta_novelty([self.R1], [], seen)
-        seen |= keys
-        fresh_r, fresh_c, _ = delta_novelty([self.R1, self.R2], [self.C1], seen)
-        assert fresh_r == [self.R2] and fresh_c == [self.C1]
-
-    def test_conflict_identity_is_kind_and_endpoints(self):
-        # A dissonance and a challenge on the same node are different findings.
-        d = {"kind": "dissonance", "from_name": "hyp-Y", "detail": "confidence:high"}
-        seen: set[str] = set()
-        _, _, keys = delta_novelty([], [self.C1], seen)
-        seen |= keys
-        _, fresh_c, _ = delta_novelty([], [d], seen)
-        assert fresh_c == [d]
-
-    def test_changed_state_is_a_new_first_sight(self):
-        # The key fingerprints CONTENT, not identity: a suppressed conflict
-        # whose state changes (props gained, detail shifted) re-announces —
-        # first sight of the new state. Identity-only keying would suppress
-        # the change forever.
-        seen: set[str] = set()
-        _, _, keys = delta_novelty([self.R1], [self.C1], seen)
-        seen |= keys
-        revised_c = {**self.C1, "props": {"revision_why": "standby verified"}}
-        changed_r = {**self.R1, "encounters": ["E1", "E2"]}
-        fresh_r, fresh_c, _ = delta_novelty([changed_r], [revised_c], seen)
-        assert fresh_c == [revised_c]
-        assert fresh_r == [changed_r]
-
-    def test_dissonance_detail_shift_reannounces(self):
-        d1 = {"kind": "dissonance", "from_name": "hyp-Y",
-              "detail": "confidence:high, 1 SUPPORTS"}
-        d2 = {"kind": "dissonance", "from_name": "hyp-Y",
-              "detail": "confidence:high, 0 SUPPORTS"}
-        seen: set[str] = set()
-        _, _, keys = delta_novelty([], [d1], seen)
-        seen |= keys
-        _, fresh_c, _ = delta_novelty([], [d2], seen)
-        assert fresh_c == [d2]
-
-
-# -- Renewal (the delivery ledger) ---------------------------------------------------
-
-
 def _deliver(nodes, ledger, turn, refresh_turns=None):
     """Partition and commit every selected body — the all-fits case."""
     kw = {} if refresh_turns is None else {"refresh_turns": refresh_turns}
@@ -283,7 +219,7 @@ class TestRenewalPartition:
         assert standing == [{"name": "concept-A", "type": "Concept"}]
 
     def test_changed_state_is_fresh_again(self):
-        # Same discipline as the delta gate: a changed fact-state is a new
+        # A changed fact-state is a new
         # first sight — the description shifted, the full body re-delivers.
         ledger: dict = {}
         _deliver([self.N1], ledger, turn=1)
@@ -459,31 +395,6 @@ class TestFormatPayload:
         assert kept_idx == list(range(len(kept_idx)))  # a prefix, no gaps
 
 
-class TestFormatDelta:
-    def test_silence_when_nothing_recognized_and_nothing_contested(self):
-        assert format_delta([], []) == ""
-
-    def test_recognition_names_the_constituting_encounters(self):
-        p = format_delta(
-            [{"name": "FCCC", "type": "Component",
-              "encounters": ["Encounter 012", "Encounter 017"]}],
-            [],
-        )
-        assert "already held: FCCC" in p
-        assert "Encounter 012, Encounter 017" in p
-        assert p.splitlines()[0].startswith("[substrate delta")
-
-    def test_conflict_is_the_finding(self):
-        p = format_delta(
-            [],
-            [{"kind": "challenge", "from_name": "new result",
-              "to_name": "held hypothesis", "severity": 1.0}],
-        )
-        assert "CONTESTS what you hold" in p
-
-
-# -- frontier_mute (v0.6.0) --------------------------------------------------------
-
 class TestFrontierMute:
     def test_accepted_as_bool_on_candidate_types(self):
         for t, req in (
@@ -538,85 +449,6 @@ class TestFrontierSeedCandidates:
 
 @pytest.mark.asyncio
 class TestInfuseOrchestration:
-    async def test_mode_is_validated(self):
-        agent_memory = Neo4jAgentMemory(FakeDriver())
-        with pytest.raises(ValueError, match="Unknown infuse mode"):
-            await agent_memory.infuse("text", mode="firehose")
-
-    async def test_delta_silence_when_nothing_matches(self):
-        agent_memory = Neo4jAgentMemory(FakeDriver())  # fulltext returns no records
-        out = await agent_memory.infuse("a batch about nothing held", mode="delta")
-        assert out["silence"] is True and out["payload"] == ""
-
-    async def test_delta_recognition_and_conflict(self):
-        driver = FakeDriver(script=[
-            ("db.index.fulltext.queryNodes", [
-                {"name": "FCCC bookmark", "type": "Component",
-                 "description": None, "score": 2.0},
-            ]),
-            ("collect(e.name) AS encounters", [
-                {"name": "FCCC bookmark", "encounters": ["Encounter 012"]},
-            ]),
-            ("-[r:CHALLENGES]->", [
-                {"from_name": "new obs", "to_name": "held hyp", "props": {}},
-            ]),
-        ])
-        out = await agent_memory_infuse_delta(driver)
-        assert out["silence"] is False
-        assert "already held: FCCC bookmark" in out["payload"]
-        assert "Encounter 012" in out["payload"]
-        assert "CONTESTS what you hold" in out["payload"]
-        # Delta computes no rank, so it asserts no amplitude: a severity here
-        # would contradict full mode's computed severity for the same edge.
-        assert all("severity" not in c for c in out["conflicts"])
-        # Delta never touches GDS: no projection created.
-        assert not any("gds.graph.project" in q for q, _ in driver.calls)
-
-    async def test_delta_novelty_announces_once_per_locus(self):
-        driver = FakeDriver(script=[
-            ("db.index.fulltext.queryNodes", [
-                {"name": "FCCC bookmark", "type": "Component",
-                 "description": None, "score": 2.0},
-            ]),
-            ("collect(e.name) AS encounters", [
-                {"name": "FCCC bookmark", "encounters": ["Encounter 012"]},
-            ]),
-            ("-[r:CHALLENGES]->", [
-                {"from_name": "new obs", "to_name": "held hyp", "props": {}},
-            ]),
-        ])
-        agent_memory = Neo4jAgentMemory(driver)
-        first = await agent_memory.infuse(
-            "result mentioning FCCC", mode="delta", locus_key="locus-1"
-        )
-        assert first["silence"] is False
-        assert first["suppressed"] == {"recognitions": 0, "conflicts": 0}
-        # Same content, same locus: the debounce — everything already
-        # announced, so the payload is silence and the counts say why.
-        second = await agent_memory.infuse(
-            "result mentioning FCCC", mode="delta", locus_key="locus-1"
-        )
-        assert second["silence"] is True and second["payload"] == ""
-        assert second["suppressed"] == {"recognitions": 1, "conflicts": 1}
-        # A DIFFERENT locus has been told nothing: first sight again.
-        other = await agent_memory.infuse(
-            "result mentioning FCCC", mode="delta", locus_key="locus-2"
-        )
-        assert other["silence"] is False
-
-    async def test_delta_without_locus_never_suppresses(self):
-        driver = FakeDriver(script=[
-            ("db.index.fulltext.queryNodes", [
-                {"name": "FCCC bookmark", "type": "Component",
-                 "description": None, "score": 2.0},
-            ]),
-        ])
-        agent_memory = Neo4jAgentMemory(driver)
-        for _ in range(2):
-            out = await agent_memory.infuse("result mentioning FCCC", mode="delta")
-            assert out["silence"] is False
-            assert out["suppressed"] == {"recognitions": 0, "conflicts": 0}
-
     async def test_full_silence_when_no_seeds_anywhere(self):
         # Matches exist but carry no coherence edges; frontier empty.
         driver = FakeDriver(script=[
@@ -627,7 +459,7 @@ class TestInfuseOrchestration:
             ("AS eligible", [{"eligible": []}]),
         ])
         agent_memory = Neo4jAgentMemory(driver)
-        out = await agent_memory.infuse("something new", mode="full")
+        out = await agent_memory.infuse("something new")
         assert out["silence"] is True
         assert out["seed_mode"] == "none"
         assert not any("gds.graph.project" in q for q, _ in driver.calls)
@@ -666,7 +498,7 @@ class TestInfuseOrchestration:
             ]),
         ])
         agent_memory = Neo4jAgentMemory(driver)
-        out = await agent_memory.infuse("tell me about concept A", mode="full")
+        out = await agent_memory.infuse("tell me about concept A")
         assert out["silence"] is False
         assert out["seed_mode"] == "focal_only"
         assert out["rank_mode"] == "biased_single"
@@ -707,25 +539,25 @@ class TestInfuseOrchestration:
             ]),
         ]
         agent_memory = Neo4jAgentMemory(FakeDriver(script=script))
-        one = await agent_memory.infuse("about concept A", mode="full", locus_key="L1")
+        one = await agent_memory.infuse("about concept A", locus_key="L1")
         assert one["turn"] == 1
         assert one["counts"]["payload_nodes"] == 2 and one["counts"]["standing"] == 0
         assert "STANDING" not in one["payload"]
-        two = await agent_memory.infuse("about concept A again", mode="full", locus_key="L1")
+        two = await agent_memory.infuse("about concept A again", locus_key="L1")
         assert two["turn"] == 2
         assert two["counts"]["payload_nodes"] == 0 and two["counts"]["standing"] == 2
         assert "STANDING — delivered earlier this waking" in two["payload"]
         assert len(two["payload"]) < len(one["payload"])
         # A different locus is fresh again; a stateless caller always is.
-        other = await agent_memory.infuse("about concept A", mode="full", locus_key="L2")
+        other = await agent_memory.infuse("about concept A", locus_key="L2")
         assert other["counts"]["standing"] == 0
-        stateless = await agent_memory.infuse("about concept A", mode="full")
+        stateless = await agent_memory.infuse("about concept A")
         assert stateless["counts"]["standing"] == 0 and stateless["turn"] == 0
 
     async def test_expansion_tier_enters_the_blend_and_can_be_disabled(self):
-        # EXPERIMENT-BARLOW B2: concept-cluster siblings enter the biased
+        # Concept-cluster siblings enter the biased
         # pairs at the expansion bias; expansion_bias=0 disables the reach
-        # entirely (the benchmark's OFF arm).
+        # entirely (the measured off-arm).
         script = [
             ("db.index.fulltext.queryNodes", [
                 {"name": "concept-A", "type": "Concept",
@@ -747,7 +579,7 @@ class TestInfuseOrchestration:
         ]
         driver = FakeDriver(script=script)
         agent_memory = Neo4jAgentMemory(driver)
-        out = await agent_memory.infuse("about concept A", mode="full")
+        out = await agent_memory.infuse("about concept A")
         # The already-focal name is deduped out of the expansion set.
         assert out["expansion_seeds"] == ["sibling-X"]
         assert out["expansion_bias"] == 0.5
@@ -757,7 +589,7 @@ class TestInfuseOrchestration:
         # OFF arm: bias 0 issues no expansion query at all.
         driver2 = FakeDriver(script=script)
         out2 = await Neo4jAgentMemory(driver2).infuse(
-            "about concept A", mode="full", expansion_bias=0.0
+            "about concept A", expansion_bias=0.0
         )
         assert out2["expansion_seeds"] == []
         assert not any("MATCH (s:Concept)-[" in (q or "") for q, _ in driver2.calls)
@@ -778,7 +610,7 @@ class TestInfuseOrchestration:
             ]),
         ]
         agent_memory = Neo4jAgentMemory(FakeDriver(script=script))
-        one = await agent_memory.infuse("concept A", mode="full", locus_key="L9")
+        one = await agent_memory.infuse("concept A", locus_key="L9")
         assert one["renewal"]["fresh"] == ["concept-A"]
         assert one["renewal"]["standing"] == []
         # v0.7.1: selection and delivery are reported separately, and with a
@@ -788,7 +620,7 @@ class TestInfuseOrchestration:
         assert one["renewal"]["body_origin"]["concept-A"] in {
             "focal", "expansion", "frontier", "ranked"
         }
-        two = await agent_memory.infuse("concept A", mode="full", locus_key="L9")
+        two = await agent_memory.infuse("concept A", locus_key="L9")
         assert two["renewal"]["fresh"] == []
         assert two["renewal"]["standing"] == ["concept-A"]
         assert two["renewal"]["delivered_handles"] == ["concept-A"]
@@ -796,8 +628,8 @@ class TestInfuseOrchestration:
     async def test_dropped_body_does_not_stamp_the_ledger(self):
         """v0.7.1 regression: a body squeezed out by the budget must NOT
         reset its clock. Stamping from selection produced 31 phantom
-        delivery records in a 7-turn session and would have handed
-        EXPERIMENT-BARLOW B1 a corrupted independent variable."""
+        delivery records in a 7-turn session, which would corrupt the
+        independent variable any refresh-horizon measurement rests on."""
         ledger: dict = {}
         n = {"name": "concept-A", "type": "Concept", "description": "x" * 400}
         fresh, standing, fps = renewal_partition([n], ledger, turn=1)
@@ -850,13 +682,8 @@ class TestInfuseOrchestration:
         ])
         agent_memory = Neo4jAgentMemory(driver)
         with pytest.raises(RuntimeError, match="gds fell over"):
-            await agent_memory.infuse("boom", mode="full")
+            await agent_memory.infuse("boom")
         assert any("gds.graph.drop" in q for q, _ in driver.calls)
-
-
-async def agent_memory_infuse_delta(driver):
-    agent_memory = Neo4jAgentMemory(driver)
-    return await agent_memory.infuse("result mentioning FCCC", mode="delta")
 
 
 # -- Config ---------------------------------------------------------------------------
@@ -934,23 +761,27 @@ class TestInfuseConfig:
 # -- Progression assembly (v0.8.0, the progression reform) -----------------------
 
 
-def _dell_steps():
-    """The Dell/CNTLM progression — the standing falsification case."""
+def _node_steps():
+    """A deployment progression whose early step is later superseded.
+
+    The standing falsification case: a stale claim and its resolution must
+    arrive in order, dated, with the resolution never preceding the claim.
+    """
     mk = lambda name, sk, type_="Observation", desc="": {
         "name": name, "type": type_, "description": desc,
         "sort_key": sk, "encounter": "Encounter Aug", "enc_t": sk,
     }
     return [
-        mk("XE8640 discovery: sole constraint is stale cntlm credentials",
+        mk("node-07 discovery: sole constraint is stale proxy credentials",
            "2026-08-03T17:10:00Z",
-           desc="4x H100 healthy; cntlm creds stale on the jump-box proxy."),
-        mk("Conor repointed cntlm's parent endpoint and full egress returned",
-           "2026-08-03T17:35:00Z", desc="HF weights stream; pypi passes."),
-        mk("First light: gpt-oss-20b at 323 tok/s", "2026-08-03T18:55:00Z"),
-        mk("gpt-oss-120b live at 222 tok/s", "2026-08-04T02:45:00Z"),
-        mk("Mistral Large 2411 serving", "2026-08-08T00:55:00Z"),
-        mk("Medium 3.5 serving at 256k", "2026-08-08T09:50:00Z",
-           desc="497k-token KV cache; tokenizer-mode mistral."),
+           desc="All accelerators healthy; proxy creds stale on the bastion."),
+        mk("Proxy parent endpoint repointed and full egress returned",
+           "2026-08-03T17:35:00Z", desc="Model weights stream; package index passes."),
+        mk("First light: small model at 323 tok/s", "2026-08-03T18:55:00Z"),
+        mk("Large model live at 222 tok/s", "2026-08-04T02:45:00Z"),
+        mk("Extended-context model serving", "2026-08-08T00:55:00Z"),
+        mk("Mid-tier model serving at 256k", "2026-08-08T09:50:00Z",
+           desc="497k-token KV cache."),
         mk("What is the production serving configuration?",
            "2026-08-08T10:00:00Z", type_="Question"),
     ]
@@ -962,21 +793,21 @@ def _rows_for(component, steps):
 
 class TestGroupProgressions:
     def test_one_progression_per_component_regardless_of_seeds(self):
-        rows = _rows_for("stnamcvdl200", _dell_steps())
+        rows = _rows_for("node-07", _node_steps())
         groups = group_progressions(
             rows,
-            ["XE8640 discovery: sole constraint is stale cntlm credentials",
-             "Medium 3.5 serving at 256k"],
+            ["node-07 discovery: sole constraint is stale proxy credentials",
+             "Mid-tier model serving at 256k"],
         )
         assert len(groups) == 1
-        assert groups[0]["component"] == "stnamcvdl200"
+        assert groups[0]["component"] == "node-07"
         assert len(groups[0]["seed_names"]) == 2
 
     def test_steps_ordered_by_coalesced_noticing_time(self):
-        rows = list(reversed(_rows_for("comp", _dell_steps())))
-        groups = group_progressions(rows, ["Mistral Large 2411 serving"])
+        rows = list(reversed(_rows_for("comp", _node_steps())))
+        groups = group_progressions(rows, ["Extended-context model serving"])
         names = [s["name"] for s in groups[0]["steps"]]
-        assert names[0].startswith("XE8640 discovery")
+        assert names[0].startswith("node-07 discovery")
         assert names[-1].startswith("What is the production")
 
     def test_encounter_t_exist_breaks_noticing_time_ties(self):
@@ -994,28 +825,28 @@ class TestGroupProgressions:
         assert names == ["earlier-encounter step", "later-encounter step"]
 
     def test_single_step_component_is_not_a_progression(self):
-        rows = _rows_for("solo", _dell_steps()[:1])
+        rows = _rows_for("solo", _node_steps()[:1])
         assert group_progressions(rows, [rows[0]["name"]]) == []
 
     def test_component_without_a_selected_member_is_excluded(self):
-        rows = _rows_for("comp", _dell_steps())
+        rows = _rows_for("comp", _node_steps())
         assert group_progressions(rows, ["unrelated node"]) == []
 
     def test_multi_component_membership_appears_in_both(self):
-        shared = _dell_steps()[0]
-        rows = (_rows_for("comp-a", _dell_steps()[:3])
-                + _rows_for("comp-b", [shared, _dell_steps()[3]]))
+        shared = _node_steps()[0]
+        rows = (_rows_for("comp-a", _node_steps()[:3])
+                + _rows_for("comp-b", [shared, _node_steps()[3]]))
         groups = group_progressions(rows, [shared["name"]])
         assert {g["component"] for g in groups} == {"comp-a", "comp-b"}
 
 
 class TestProgressionRenewal:
     def test_first_sight_is_full(self):
-        form, fp, new = progression_renewal("comp", _dell_steps(), {}, 1)
+        form, fp, new = progression_renewal("comp", _node_steps(), {}, 1)
         assert form == "full" and new == [] and fp.startswith("prog|")
 
     def test_unchanged_and_fresh_is_standing(self):
-        steps = _dell_steps()
+        steps = _node_steps()
         ledger: dict = {}
         _, fp, _ = progression_renewal("comp", steps, ledger, 1)
         commit_progression(ledger, "comp", fp, [s["name"] for s in steps], 1)
@@ -1023,7 +854,7 @@ class TestProgressionRenewal:
         assert form == "standing"
 
     def test_unchanged_and_stale_is_full_again(self):
-        steps = _dell_steps()
+        steps = _node_steps()
         ledger: dict = {}
         _, fp, _ = progression_renewal("comp", steps, ledger, 1)
         commit_progression(ledger, "comp", fp, [s["name"] for s in steps], 1)
@@ -1031,7 +862,7 @@ class TestProgressionRenewal:
         assert form == "full"
 
     def test_new_step_is_advance_with_the_delta_named(self):
-        steps = _dell_steps()
+        steps = _node_steps()
         ledger: dict = {}
         _, fp, _ = progression_renewal("comp", steps[:-2], ledger, 1)
         commit_progression(
@@ -1039,11 +870,11 @@ class TestProgressionRenewal:
         )
         form, _, new = progression_renewal("comp", steps, ledger, 2)
         assert form == "advance"
-        assert set(new) == {"Medium 3.5 serving at 256k",
+        assert set(new) == {"Mid-tier model serving at 256k",
                             "What is the production serving configuration?"}
 
     def test_revised_content_without_new_steps_is_full(self):
-        steps = _dell_steps()
+        steps = _node_steps()
         ledger: dict = {}
         _, fp, _ = progression_renewal("comp", steps, ledger, 1)
         commit_progression(ledger, "comp", fp, [s["name"] for s in steps], 1)
@@ -1056,39 +887,39 @@ class TestProgressionRenewal:
 class TestFormatProgression:
     def test_terminus_is_last_state_step_not_trailing_question(self):
         lines, delivered = format_progression(
-            "stnamcvdl200", _dell_steps(), ["Mistral Large 2411 serving"]
+            "node-07", _node_steps(), ["Extended-context model serving"]
         )
         now = next(ln for ln in lines if ln.startswith("  NOW"))
-        assert "Medium 3.5 serving at 256k" in now
-        assert "Medium 3.5 serving at 256k" in delivered["bodies"]
+        assert "Mid-tier model serving at 256k" in now
+        assert "Mid-tier model serving at 256k" in delivered["bodies"]
 
     def test_frontier_step_renders_as_open_line(self):
-        lines, _ = format_progression("comp", _dell_steps(), ["Mistral Large 2411 serving"])
+        lines, _ = format_progression("comp", _node_steps(), ["Extended-context model serving"])
         assert any(
             ln.startswith("  ? open (Question)") for ln in lines
         )
 
     def test_stale_step_arrives_tensed_and_before_its_resolution(self):
         # The standing falsification test (design of record §8): the stale
-        # CNTLM claim appears as a DATED step, temporally before the
+        # The stale claim appears as a DATED step, temporally before the
         # resolution — never as an unmodalized present-tense assertion.
         lines, _ = format_progression(
-            "stnamcvdl200", _dell_steps(),
-            ["XE8640 discovery: sole constraint is stale cntlm credentials"],
+            "node-07", _node_steps(),
+            ["node-07 discovery: sole constraint is stale proxy credentials"],
         )
         text = "\n".join(lines)
-        stale = next(ln for ln in lines if "stale cntlm" in ln)
+        stale = next(ln for ln in lines if "stale proxy" in ln)
         assert "2026-08-03" in stale
-        assert text.index("stale cntlm") < text.index("repointed cntlm")
-        assert text.index("repointed cntlm") < text.index("NOW (2026-08-08)")
+        assert text.index("stale proxy") < text.index("endpoint repointed")
+        assert text.index("endpoint repointed") < text.index("NOW (2026-08-08)")
 
     def test_seed_distinct_from_terminus_gets_a_body(self):
         lines, delivered = format_progression(
-            "comp", _dell_steps(),
-            ["XE8640 discovery: sole constraint is stale cntlm credentials"],
+            "comp", _node_steps(),
+            ["node-07 discovery: sole constraint is stale proxy credentials"],
         )
         seed_line = next(ln for ln in lines if ln.startswith("  SEED"))
-        assert "jump-box proxy" in seed_line  # the description, not a handle
+        assert "bastion" in seed_line  # the description, not a handle
         assert len(delivered["bodies"]) == 2
 
     def test_protected_step_survives_while_middles_fold(self):
@@ -1121,39 +952,39 @@ class TestFormatProgression:
 
     def test_standing_form_is_one_line(self):
         lines, delivered = format_progression(
-            "comp", _dell_steps(), ["Mistral Large 2411 serving"],
+            "comp", _node_steps(), ["Extended-context model serving"],
             form="standing",
         )
         assert len(lines) == 1
         assert "progression standing" in lines[0]
-        assert "Medium 3.5" in lines[0]  # the terminus is named
+        assert "Mid-tier model" in lines[0]  # the terminus is named
         assert delivered["bodies"] == []
 
     def test_advance_form_is_terminus_plus_delta(self):
         lines, delivered = format_progression(
-            "comp", _dell_steps(), ["Mistral Large 2411 serving"],
+            "comp", _node_steps(), ["Extended-context model serving"],
             form="advance",
-            new_step_names=["Medium 3.5 serving at 256k"],
+            new_step_names=["Mid-tier model serving at 256k"],
         )
         text = "\n".join(lines)
         assert "progression advanced" in lines[0]
         assert "NOW (2026-08-08)" in text
         # The old resolved steps do NOT re-render in an advance.
-        assert "repointed cntlm" not in text
-        assert "Medium 3.5 serving at 256k" in delivered["bodies"]
+        assert "endpoint repointed" not in text
+        assert "Mid-tier model serving at 256k" in delivered["bodies"]
 
     def test_terminus_grounding_renders_inline(self):
         lines, _ = format_progression(
-            "comp", _dell_steps(), ["Mistral Large 2411 serving"],
+            "comp", _node_steps(), ["Extended-context model serving"],
             grounding=["GROUNDS → A GPU is vacated when the driver finishes teardown"],
         )
         assert any("A GPU is vacated" in ln for ln in lines)
 
 
 class TestFormatPayloadProgressions:
-    def _block(self, component="stnamcvdl200"):
+    def _block(self, component="node-07"):
         lines, delivered = format_progression(
-            component, _dell_steps(), ["Mistral Large 2411 serving"]
+            component, _node_steps(), ["Extended-context model serving"]
         )
         return {"component": component, "lines": lines,
                 "bodies": delivered["bodies"], "steps": delivered["steps"]}
@@ -1169,8 +1000,8 @@ class TestFormatPayloadProgressions:
         )
         assert "PROGRESSIONS — what you hold about these" in p
         assert p.index("PROGRESSIONS") < p.index("NEIGHBORHOOD")
-        assert delivered["progressions"] == ["stnamcvdl200"]
-        assert "Medium 3.5 serving at 256k" in delivered["prog_bodies"]
+        assert delivered["progressions"] == ["node-07"]
+        assert "Mid-tier model serving at 256k" in delivered["prog_bodies"]
 
     def test_blocks_yield_atomically_never_mid_block(self):
         # A squeezed progression could strand the stale step without its
@@ -1202,26 +1033,3 @@ class TestFormatPayloadProgressions:
         ])
         assert '↳ instantiates "the principle" — one of 5' in p
 
-
-class TestFormatDeltaProgression:
-    def test_recognition_carries_progression_and_terminus(self):
-        p = format_delta(
-            [{"name": "XE8640 discovery", "type": "Observation",
-              "encounters": ["Encounter Aug 3"],
-              "progression": {"component": "stnamcvdl200",
-                              "terminus": "Medium 3.5 serving at 256k"}}],
-            [],
-        )
-        assert "step in progression stnamcvdl200" in p
-        assert "current terminus: Medium 3.5 serving at 256k" in p
-
-    def test_recognition_that_is_the_terminus_says_so(self):
-        p = format_delta(
-            [{"name": "Medium 3.5 serving at 256k", "type": "Observation",
-              "encounters": [],
-              "progression": {"component": "stnamcvdl200",
-                              "terminus": "Medium 3.5 serving at 256k"}}],
-            [],
-        )
-        assert "terminus of progression stnamcvdl200" in p
-        assert "current terminus:" not in p

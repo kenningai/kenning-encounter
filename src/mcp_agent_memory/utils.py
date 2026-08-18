@@ -197,8 +197,8 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
 
     # Infusion governor: the renewal refresh horizon — turns before a
     # standing body re-delivers (redundancy re-injection against
-    # standing-picture attenuation). Hand-set 10 until EXPERIMENT-BARLOW
-    # B1 places it from the measured attenuation curve.
+    # standing-picture attenuation). Hand-set 10 until measurement places
+    # it from the attenuation curve; do not tune it by feel.
     rt = args.infuse_refresh_turns
     if rt is None:
         rt = _env_int("NEO4J_INFUSE_REFRESH_TURNS")

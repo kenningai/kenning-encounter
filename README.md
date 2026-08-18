@@ -137,20 +137,29 @@ Three disciplines keep the channel honest:
   context"). Payloads rotate with the work instead of droning a permanent
   core. The ledger is stamped from what was actually *delivered*, never
   merely selected, and the metadata reports both.
-- **Silence is a valid answer.** `mode=delta` (per tool call) returns
-  recognition or conflict only — and when the moment holds nothing the graph
-  recognizes and contests nothing it holds, it returns nothing. Each
-  fact-state announces once, at first sight, then suppresses; a changed
-  state re-announces.
+- **Silence is a valid answer.** When the arriving prompt touches nothing
+  the graph holds and contests nothing it believes, the payload is the empty
+  string and the hook stays quiet.
+- **One channel, by construction (v0.8.0).** Infusion is a *conflux*
+  operation: it has content only where two frames meet. A written prompt
+  crosses a frame boundary — you cannot know what the other holds until the
+  conflux is actualized. A tool return does not: the agent issued that call
+  because something in its own frontier caught its attention, so the
+  trajectory an infusion would make meaning from, it already *is*. The
+  per-tool-call `delta` mode is gone, and with it the `mode` parameter. A
+  surprising tool return is a reason for the agent to *invoke* a lookup —
+  an invoked lookup's silence is a result; an ambient channel's silence is
+  not readable at all.
 - **Graph-native reach.** Focal seeds expand one hop across authored
   coherence edges from matched Concepts, at reduced bias — the concept that
   *matches* often sits one edge from the one that *matters*. No embeddings,
   no vector index, nothing vector-shaped ever stored.
 
 `scripts/agent_memory_infuse_hook.py` is a stdlib-only, fail-silent hook
-client for Claude Code-style harnesses: full mode on each user prompt, delta
-mode per tool call. If the server is down, the hook stays silent — the agent
-just runs uninfused.
+client for Claude Code-style harnesses: one call on each user prompt. If the
+server is down — or the command line carries a flag from an older version —
+the hook stays silent and exits 0; the agent just runs uninfused. It never
+blocks a turn.
 
 ### Wiring the hook
 
@@ -166,7 +175,12 @@ just runs uninfused.
 Hook configuration: `AGENT_MEMORY_MCP_URL` (default
 `http://127.0.0.1:8003/mcp/`) or `--url`; `AGENT_MEMORY_INFUSE_TIMEOUT`
 seconds (default `10.0`) or `--timeout`; `AGENT_MEMORY_INFUSE_SHADOW_LOG` /
-`AGENT_MEMORY_INFUSE_OBSERVE_LOG` for the shadow and observation streams.
+`AGENT_MEMORY_INFUSE_OBSERVE_LOG` for the shadow and observation streams;
+`AGENT_MEMORY_INFUSE=auto|on|off` (default `auto`) is the switch — `auto`
+infuses on a written prompt and stays silent on a scheduled trigger, `on`
+declares a second frame the harness cannot detect (an inbound message from
+another agent), `off` disables. Every suppression is recorded with its
+reason, never silently.
 The timeout default is sized to the **cold first call** — the first prompt
 of a session ranks against a cold Neo4j page cache at roughly 10× the warm
 cost, and because the hook is fail-silent, a budget that only fits the warm
@@ -184,8 +198,7 @@ Deployment notes, each learned from a real deployment:
   machine, pointed at a graph that has nothing to do with that work.
 - **Stage it.** Run `--shadow` for a few real sessions first — it computes
   everything and injects nothing, logging what *would* have been surfaced,
-  so you read the payloads before they condition a live turn. Wire
-  `UserPromptSubmit` alone before adding the high-frequency delta channel.
+  so you read the payloads before they condition a live turn.
 
 ## Quick start
 
