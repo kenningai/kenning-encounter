@@ -1,14 +1,14 @@
 [project]
-name = "mcp-agent-memory"
-version = "0.8.0"
-description = "Structured, persistent working memory for LLM agents over Neo4j — accumulate, recall, and reason across sessions, with tool-enforced integrity"
+name = "kenning-encounter"
+version = "0.9.0"
+description = "An encounter-sequential substrate for an agent's own accumulated experience, over Neo4j — integrated temporal causality, authored coherence, and provenance that survives revision"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { file = "LICENSE" }
 authors = [
-    { name = "Conor O'Shea, Kenning AI", email = "contact@kenningai.com" },
+    { name = "Conor O'Shea, Kenning AI LLC", email = "contact@kenningai.com" },
 ]
-keywords = ["mcp", "neo4j", "llm", "agent", "memory", "knowledge-graph", "recall"]
+keywords = ["mcp", "neo4j", "llm", "agent", "memory", "knowledge-graph", "provenance", "temporal"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -26,8 +26,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kenningai/mcp-agent-memory"
-Repository = "https://github.com/kenningai/mcp-agent-memory"
+Homepage = "https://github.com/kenningai/kenning-encounter"
+Repository = "https://github.com/kenningai/kenning-encounter"
 
 [build-system]
 requires = ["hatchling"]
@@ -42,10 +42,10 @@ dev = [
 ]
 
 [project.scripts]
-mcp-agent-memory = "mcp_agent_memory:main"
+kenning-encounter = "kenning_encounter:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcp_agent_memory"]
+packages = ["src/kenning_encounter"]

@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from mcp_agent_memory.meaning import (
+from kenning_encounter.meaning import (
     MATCHER_HEADER,
     MEANING_PROMPT,
     MeaningIndex,
@@ -261,7 +261,7 @@ class TestSidecarAutomation:
         assert to_compress == []
 
     def test_file_version_read_and_stamped_on_upsert(self, tmp_path):
-        from mcp_agent_memory.meaning import PROMPT_VERSION
+        from kenning_encounter.meaning import PROMPT_VERSION
 
         p = tmp_path / "sidecar.json"
         p.write_text(json.dumps({"prompt_version": "v1", "nodes": NODES}))

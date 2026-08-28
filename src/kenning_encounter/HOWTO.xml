@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  HOWTO: Using mcp-agent-memory correctly.
+  HOWTO: Using kenning-encounter correctly.
 
   This document is for you — the LLM operating these tools. Not for a human
   developer. For the agent that will open sessions, record what it learns, and

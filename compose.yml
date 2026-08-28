@@ -1,27 +1,27 @@
-name: agent_memory
+name: kenning_encounter
 
-# A single semantic-experience unit: Neo4j (the substrate) + the Agent Memory MCP server
-# (the writer/reader). The Agent Memory talks to Neo4j over the internal Docker network
+# A single semantic-experience unit: Neo4j (the substrate) + Kenning Encounter MCP server
+# (the writer/reader). Kenning Encounter talks to Neo4j over the internal Docker network
 # (bolt://neo4j:7687, service-name DNS); the published 7474/7687 ports are for
 # external access (Neo4j Browser, external Bolt clients) and are NOT needed for
-# the Agent Memory -> Neo4j path.
+# Kenning Encounter -> Neo4j path.
 #
-# Requires NEO4J_AGENT_MEMORY_PASSWORD in the environment or a .env file (see .env.example).
+# Requires NEO4J_KENNING_ENCOUNTER_PASSWORD in the environment or a .env file (see .env.example).
 
 services:
   neo4j:
     image: neo4j:2026.04.0          # Community Edition (no -enterprise suffix); latest calendar release
-    container_name: agent_memory-neo4j
+    container_name: kenning_encounter-neo4j
     ports:
       - "7474:7474"                 # HTTP / Neo4j Browser
       - "7687:7687"                 # Bolt
     environment:
-      NEO4J_AUTH: "neo4j/${NEO4J_AGENT_MEMORY_PASSWORD}"
+      NEO4J_AUTH: "neo4j/${NEO4J_KENNING_ENCOUNTER_PASSWORD}"
 
       # Plugins are auto-downloaded version-matched to the Neo4j image. Under
       # calendar versioning APOC and GDS ship in lockstep (e.g. apoc 2026.05.0
       # for neo4j 2026.05.0), so this never strands a mismatched jar. Both run on
-      # Community; the Agent Memory needs apoc (apoc.meta.schema) and graph-data-science
+      # Community; Kenning Encounter needs apoc (apoc.meta.schema) and graph-data-science
       # (gds.* — pagerank/betweenness/louvain/wcc/projections). The image also
       # auto-sets dbms.security.procedures.unrestricted for these — do NOT set it
       # manually, it conflicts with the plugin auto-config.
@@ -31,12 +31,12 @@ services:
       # apoc-extended build, startup will fail on the download — pin back if so.
       # NEO4J_PLUGINS: '["apoc","apoc-extended","graph-data-science"]'
 
-      # Community has exactly ONE user database — you cannot CREATE DATABASE agent-memory.
-      # Name the single default database 'agent-memory' so the Agent Memory's NEO4J_DATABASE=agent-memory
+      # Community has exactly ONE user database — you cannot CREATE DATABASE kenning-encounter.
+      # Name the single default database 'kenning-encounter' so Kenning Encounter's NEO4J_DATABASE=kenning-encounter
       # resolves instead of erroring "database does not exist".
-      NEO4J_initial_dbms_default__database: "agent-memory"
+      NEO4J_initial_dbms_default__database: "kenning-encounter"
 
-      # Reasonable single-agent memory. The Agent Memory graph is small; GDS projections
+      # Reasonable single-agent memory. The Kenning Encounter graph is small; GDS projections
       # live in heap. Tune later with `neo4j-admin server memory-recommendation`.
       NEO4J_server_memory_pagecache_size: "1G"
       NEO4J_server_memory_heap_initial__size: "1G"
@@ -56,19 +56,19 @@ services:
       # leave a stale plugin behind. (Costs a few seconds + internet at boot.)
     healthcheck:
       # Gate readiness on actually answering a query, not just the port opening —
-      # otherwise the Agent Memory races Neo4j, fails verify_connectivity(), and exit(1)s
+      # otherwise Kenning Encounter races Neo4j, fails verify_connectivity(), and exit(1)s
       # into a restart loop. Generous start_period covers first-boot plugin fetch.
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p '${NEO4J_AGENT_MEMORY_PASSWORD}' 'RETURN 1' || exit 1"]
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p '${NEO4J_KENNING_ENCOUNTER_PASSWORD}' 'RETURN 1' || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 15
       start_period: 60s
     restart: unless-stopped
 
-  agent_memory:
+  kenning_encounter:
     build: .
-    image: mcp-agent-memory:0.8.0
-    container_name: agent_memory-mcp
+    image: kenning-encounter:0.9.0
+    container_name: kenning_encounter-mcp
     depends_on:
       neo4j:
         condition: service_healthy   # wait until Neo4j answers queries, not just opens the port
@@ -77,8 +77,8 @@ services:
     environment:
       NEO4J_URI: "bolt://neo4j:7687" # internal Docker DNS — no published port needed for this hop
       NEO4J_USERNAME: "neo4j"
-      NEO4J_PASSWORD: "${NEO4J_AGENT_MEMORY_PASSWORD}"
-      NEO4J_DATABASE: "agent-memory"
+      NEO4J_PASSWORD: "${NEO4J_KENNING_ENCOUNTER_PASSWORD}"
+      NEO4J_DATABASE: "kenning-encounter"
       NEO4J_TRANSPORT: "http"
       NEO4J_MCP_SERVER_HOST: "0.0.0.0"
       NEO4J_MCP_SERVER_PORT: "8000"
@@ -115,11 +115,11 @@ services:
       # The meaning sidecar lives INSIDE the stack, like neo4j_data — a
       # named volume, not a host file, so nothing on the host (cleanup
       # jobs, path conventions, curious hands) can touch it and the whole
-      # Agent Memory is one `docker compose up`. It is a derived, self-healing
+      # Kenning Encounter is one `docker compose up`. It is a derived, self-healing
       # cache: the server meaning-makes new nodes into it on write and a
       # startup reconcile sweep rebuilds any gap — up to the entire file —
       # from the graph. Inspect with:
-      #   docker exec agent_memory-mcp cat /app/models/meaning_sidecar.json
+      #   docker exec kenning_encounter-mcp cat /app/models/meaning_sidecar.json
       - sidecar_data:/app/models
       # HTTP sessions are always stateful (v0.3.0) — no knob. The session IS
       # the locus: encounters depend on the states that preceded them, so the

@@ -12,4 +12,4 @@ RUN uv pip install --system .
 
 EXPOSE 8000
 
-CMD ["mcp-agent-memory"]
+CMD ["kenning-encounter"]

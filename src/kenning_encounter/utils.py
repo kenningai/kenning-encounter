@@ -6,7 +6,7 @@ from typing import Any, LiteralString, cast
 
 from neo4j import AsyncDriver, Query
 
-logger = logging.getLogger("mcp_agent_memory")
+logger = logging.getLogger("kenning_encounter")
 logger.setLevel(logging.INFO)
 
 # -- Cypher Query Loading -----------------------------------------------------
@@ -138,7 +138,7 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
     config["neo4j_database"] = (
         args.database
         or os.getenv("NEO4J_DATABASE")
-        or _default("neo4j_database", "agent-memory")
+        or _default("neo4j_database", "kenning-encounter")
     )
 
     # Transport

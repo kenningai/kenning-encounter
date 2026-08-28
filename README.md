@@ -1,10 +1,10 @@
-# mcp-agent-memory
+# kenning-encounter
 
-**Structured, persistent working memory for LLM agents, backed by Neo4j.** An MCP
-server that lets an agent accumulate what it learns about a subject across many
-separate sessions, recall it on re-entry, and reason over it — with the graph's
-integrity enforced by the tools, not by instructions. No raw writes; the agent
-physically can't corrupt its own memory.
+**Encounter driven, temporally constituted persistent memory for LLM agents,
+backed by Neo4j.** An MCP server that lets an agent accumulate what it learns
+about a subject across many separate sessions, recall it on re-entry, and reason
+over it — with the graph's integrity enforced by the tools, not by instructions.
+No raw writes; the agent physically can't corrupt its own memory.
 
 Most memory tools give an agent a flat pile of notes. This one gives it a
 *temporally ordered* memory: each session is an `Encounter`, the encounters chain
@@ -74,8 +74,8 @@ re-deriving it every session.
   `gds_betweenness` / `gds_leiden` / `gds_wcc` → `gds_drop_projection`.
 - **Infusion:** `infuse` — the *unasked* recall channel; see the next section.
 
-The operations manual is served as the MCP resource `agent-memory://howto` and
-also ships at `src/mcp_agent_memory/HOWTO.xml` — read it before recording.
+The operations manual is served as the MCP resource `kenning-encounter://howto` and
+also ships at `src/kenning_encounter/HOWTO.xml` — read it before recording.
 
 ## Governed infusion — memory that arrives on its own
 
@@ -155,7 +155,7 @@ Three disciplines keep the channel honest:
   *matches* often sits one edge from the one that *matters*. No embeddings,
   no vector index, nothing vector-shaped ever stored.
 
-`scripts/agent_memory_infuse_hook.py` is a stdlib-only, fail-silent hook
+`scripts/kenning_encounter_infuse_hook.py` is a stdlib-only, fail-silent hook
 client for Claude Code-style harnesses: one call on each user prompt. If the
 server is down — or the command line carries a flag from an older version —
 the hook stays silent and exits 0; the agent just runs uninfused. It never
@@ -167,16 +167,16 @@ blocks a turn.
 {
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command",
-      "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py --mode full" }] }]
+      "command": "/absolute/path/to/python3 /path/to/scripts/kenning_encounter_infuse_hook.py" }] }]
   }
 }
 ```
 
-Hook configuration: `AGENT_MEMORY_MCP_URL` (default
-`http://127.0.0.1:8003/mcp/`) or `--url`; `AGENT_MEMORY_INFUSE_TIMEOUT`
-seconds (default `10.0`) or `--timeout`; `AGENT_MEMORY_INFUSE_SHADOW_LOG` /
-`AGENT_MEMORY_INFUSE_OBSERVE_LOG` for the shadow and observation streams;
-`AGENT_MEMORY_INFUSE=auto|on|off` (default `auto`) is the switch — `auto`
+Hook configuration: `KENNING_ENCOUNTER_MCP_URL` (default
+`http://127.0.0.1:8003/mcp/`) or `--url`; `KENNING_ENCOUNTER_INFUSE_TIMEOUT`
+seconds (default `10.0`) or `--timeout`; `KENNING_ENCOUNTER_INFUSE_SHADOW_LOG` /
+`KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG` for the shadow and observation streams;
+`KENNING_ENCOUNTER_INFUSE=auto|on|off` (default `auto`) is the switch — `auto`
 infuses on a written prompt and stays silent on a scheduled trigger, `on`
 declares a second frame the harness cannot detect (an inbound message from
 another agent), `off` disables. Every suppression is recorded with its
@@ -204,7 +204,7 @@ Deployment notes, each learned from a real deployment:
 
 ```bash
 uv sync
-uv run mcp-agent-memory --db-url bolt://localhost:7687
+uv run kenning-encounter --db-url bolt://localhost:7687
 ```
 
 ## Docker stack (self-contained unit)
@@ -212,7 +212,7 @@ uv run mcp-agent-memory --db-url bolt://localhost:7687
 `compose.yml` brings up Neo4j **and** the server together:
 
 ```bash
-cp .env.example .env        # set a strong NEO4J_AGENT_MEMORY_PASSWORD
+cp .env.example .env        # set a strong NEO4J_KENNING_ENCOUNTER_PASSWORD
                             # and GEMINI_API_KEY for the meaning matcher
 docker compose up --build   # streamable-http on :8003
 ```
@@ -244,7 +244,7 @@ Meaning matcher: `GEMINI_API_KEY` (env only, never argv),
 `NEO4J_MATCHER_ENDPOINT`, `NEO4J_MATCHER_TIMEOUT_MS` (default `5000` —
 sized to the measured reasoning tail, not the median), and
 `NEO4J_MATCHER_SIDECAR` (container path of the sidecar file). Hook-side,
-`AGENT_MEMORY_INFUSE_TRAJECTORY_TURNS` (default `7`) sets how many prior
+`KENNING_ENCOUNTER_INFUSE_TRAJECTORY_TURNS` (default `7`) sets how many prior
 user turns the hook parses from the harness transcript and sends as the
 trajectory; `0` disables and selection sees the prompt alone.
 

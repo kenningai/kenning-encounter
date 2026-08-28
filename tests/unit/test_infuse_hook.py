@@ -1,4 +1,4 @@
-"""Unit tests for scripts/agent_memory_infuse_hook.py — the harness-side hook client.
+"""Unit tests for scripts/kenning_encounter_infuse_hook.py — the harness-side hook client.
 
 The property under test is the FULL-MODE GATE, and it exists because of a
 measured pathology rather than a preference: in a scheduled (headless) run
@@ -27,8 +27,8 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).parents[2]
-_SCRIPT = _ROOT / "scripts" / "agent_memory_infuse_hook.py"
-_spec = importlib.util.spec_from_file_location("agent_memory_infuse_hook", _SCRIPT)
+_SCRIPT = _ROOT / "scripts" / "kenning_encounter_infuse_hook.py"
+_spec = importlib.util.spec_from_file_location("kenning_encounter_infuse_hook", _SCRIPT)
 hook = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hook)
 
@@ -58,12 +58,12 @@ class TestInfusionSwitch:
 
     def test_operator_override_forces_on(self):
         allowed, why = hook.infusion_allowed(
-            {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "AGENT_MEMORY_INFUSE": "on"})
+            {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "KENNING_ENCOUNTER_INFUSE": "on"})
         assert allowed is True and why == "switch=on"
 
     def test_operator_override_forces_off(self):
         allowed, why = hook.infusion_allowed(
-            {"CLAUDE_CODE_ENTRYPOINT": "cli", "AGENT_MEMORY_INFUSE": "off"})
+            {"CLAUDE_CODE_ENTRYPOINT": "cli", "KENNING_ENCOUNTER_INFUSE": "off"})
         assert allowed is False and why == "switch=off"
 
     def test_reason_is_returned_on_both_paths(self):
@@ -82,7 +82,7 @@ def _run(env_extra, tmp_path, stdin_obj):
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
     env.update(env_extra)
-    env["AGENT_MEMORY_INFUSE_OBSERVE_LOG"] = str(log)
+    env["KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG"] = str(log)
     proc = subprocess.run(
         [sys.executable, str(_SCRIPT),
          "--url", "http://127.0.0.1:59999/api/mcp/", "--timeout", "1"],
@@ -125,10 +125,10 @@ class TestGateEndToEnd:
         # "a second frame is present" — good for the human case, blind to
         # any other. A headless run whose prompt is ANOTHER AGENT's message
         # does cross a frame boundary, and the caller is the only party that
-        # knows it. AGENT_MEMORY_INFUSE=on is how that judgment is declared; without
+        # knows it. KENNING_ENCOUNTER_INFUSE=on is how that judgment is declared; without
         # this the sibling channel would be silenced by the cron proxy.
         proc, recs = _run({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli",
-                           "AGENT_MEMORY_INFUSE": "on"}, tmp_path, self.STDIN)
+                           "KENNING_ENCOUNTER_INFUSE": "on"}, tmp_path, self.STDIN)
         assert proc.returncode == 0
         assert not any(r.get("skipped") for r in recs), \
             "a declared second frame must not be gated by the harness proxy"
@@ -207,7 +207,7 @@ class TestStaleWiringCannotBlockTheTurn:
         env = dict(os.environ)
         env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         env.update(env_extra)
-        env["AGENT_MEMORY_INFUSE_OBSERVE_LOG"] = str(log)
+        env["KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG"] = str(log)
         proc = subprocess.run(
             [sys.executable, str(_SCRIPT), *extra_argv,
              "--url", "http://127.0.0.1:59999/api/mcp/", "--timeout", "1"],

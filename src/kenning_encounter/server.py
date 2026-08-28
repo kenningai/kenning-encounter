@@ -24,8 +24,8 @@ from fastmcp.tools.base import ToolResult
 from mcp.types import TextContent, ToolAnnotations
 from neo4j.exceptions import Neo4jError
 
-from .agent_memory import (
-    Neo4jAgentMemory,
+from .kenning_encounter import (
+    Neo4jKenningEncounter,
     NodeType,
     RelationType,
     NODE_SCHEMAS,
@@ -46,7 +46,7 @@ from .meaning import (
 )
 from .utils import format_namespace, _is_write_query, _value_sanitize, lit
 
-logger = logging.getLogger("mcp_agent_memory")
+logger = logging.getLogger("kenning_encounter")
 logger.setLevel(logging.INFO)
 
 # The canonical operations manual ships inside the package and is served as an
@@ -107,7 +107,7 @@ def _locus_key(ctx: Context) -> str | None:
 # -- Server Factory -----------------------------------------------------------
 
 def create_mcp_server(
-    agent_memory: Neo4jAgentMemory,
+    kenning_encounter: Neo4jKenningEncounter,
     namespace: str = "",
     read_timeout: int = 30,
     infuse_frontier_bias: float = 0.3,
@@ -118,10 +118,10 @@ def create_mcp_server(
     matcher_timeout_ms: int = 5000,
     matcher_sidecar: str = "models/meaning_sidecar.json",
 ) -> FastMCP:
-    """Create an MCP server instance for the Agent Memory."""
+    """Create an MCP server instance for Kenning Encounter."""
 
     ns = format_namespace(namespace)
-    mcp: FastMCP = FastMCP("mcp-agent-memory")
+    mcp: FastMCP = FastMCP("kenning-encounter")
 
     meaning_index = MeaningIndex(matcher_sidecar)
 
@@ -199,7 +199,7 @@ def create_mcp_server(
         Example: {"name": "Encounter 2026-05-29T14:00 — service failover thread"}
         """
         async with _tool_errors("advance_encounter"):
-            result = await agent_memory.advance_encounter(
+            result = await kenning_encounter.advance_encounter(
                 name=name, recent=recent, limit=limit,
                 locus_key=_locus_key(ctx) if ctx else None,
             )
@@ -240,7 +240,7 @@ def create_mcp_server(
                   "report": "No change since encounter N-1; SPOF question stays open."}
         """
         async with _tool_errors("close_encounter"):
-            result = await agent_memory.close_encounter(
+            result = await kenning_encounter.close_encounter(
                 summary=summary, report=report, encounter=encounter,
                 locus_key=_locus_key(ctx) if ctx else None,
             )
@@ -306,7 +306,7 @@ def create_mcp_server(
         }
         """
         async with _tool_errors("create_entities"):
-            result = await agent_memory.create_entities(
+            result = await kenning_encounter.create_entities(
                 entities, encounter=encounter,
                 locus_key=_locus_key(ctx) if ctx else None,
             )
@@ -348,7 +348,7 @@ def create_mcp_server(
         Example: {"names": ["Stale Note about service naming"]}
         """
         async with _tool_errors("delete_entities"):
-            result = await agent_memory.delete_entities(names)
+            result = await kenning_encounter.delete_entities(names)
             try:
                 meaning_index.remove(names)
             except Exception as e:
@@ -403,7 +403,7 @@ def create_mcp_server(
         }
         """
         async with _tool_errors("create_relations"):
-            result = await agent_memory.create_relations(relations)
+            result = await kenning_encounter.create_relations(relations)
             return _json_result(result)
 
     @mcp.tool(
@@ -424,7 +424,7 @@ def create_mcp_server(
         Example: {"relations": [{"source": "A", "target": "B", "type": "ABOUT"}]}
         """
         async with _tool_errors("delete_relations"):
-            result = await agent_memory.delete_relations(relations)
+            result = await kenning_encounter.delete_relations(relations)
             return _json_result(result)
 
     # -- Query Tools ----------------------------------------------------------
@@ -445,7 +445,7 @@ def create_mcp_server(
         Example: {"query": "service failover node-02", "limit": 20}
         """
         async with _tool_errors("search"):
-            result = await agent_memory.search(query=query, limit=limit)
+            result = await kenning_encounter.search(query=query, limit=limit)
             return _json_result(result)
 
     @mcp.tool(
@@ -464,7 +464,7 @@ def create_mcp_server(
         Example: {"names": ["node-02 bookmark", "node-02 is a single point of failure"]}
         """
         async with _tool_errors("find_by_name"):
-            result = await agent_memory.find_by_name(names=names, limit=limit)
+            result = await kenning_encounter.find_by_name(names=names, limit=limit)
             return _json_result(result)
 
     @mcp.tool(
@@ -492,7 +492,7 @@ def create_mcp_server(
         Example: {"name": "Failover topology", "depth": 3}
         """
         async with _tool_errors("trace_provenance"):
-            result = await agent_memory.trace_provenance(name=name, depth=depth)
+            result = await kenning_encounter.trace_provenance(name=name, depth=depth)
             return _json_result(result)
 
     @mcp.tool(
@@ -512,7 +512,7 @@ def create_mcp_server(
         spelling of an old one does not.
         """
         async with _tool_errors("list_vocabulary"):
-            result = await agent_memory.list_vocabulary()
+            result = await kenning_encounter.list_vocabulary()
             return _json_result(result)
 
     # -- Taxonomy Tools -------------------------------------------------------
@@ -588,7 +588,7 @@ def create_mcp_server(
         Returns nodes, properties, and relationships as they exist in the database.
         """
         async with _tool_errors("get_schema"):
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 Query(
                     "CALL apoc.meta.schema({sample: 1000}) YIELD value RETURN value",
                     timeout=read_timeout,
@@ -623,12 +623,12 @@ def create_mcp_server(
         for orientation and self-examination reads only.
         """
         async with _tool_errors("read_cypher"):
-            if await _is_write_query(query, agent_memory.driver):
+            if await _is_write_query(query, kenning_encounter.driver):
                 raise ToolError(
                     "Write queries are not allowed via read_cypher. "
                     "Use the bounded mutation tools instead."
                 )
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 Query(lit(query), timeout=read_timeout),
                 parameters_=params,
                 routing_=RoutingControl.READ,
@@ -667,14 +667,14 @@ def create_mcp_server(
     ) -> ToolResult:
         """Create a GDS graph projection for self-examination.
 
-        Projects your Agent Memory into GDS memory for PageRank, Betweenness, Leiden,
+        Projects your Kenning Encounter into GDS memory for PageRank, Betweenness, Leiden,
         and WCC — run by you, on yourself. Scoping the projection is how you
         formulate the question; it is yours to choose. To preserve the
         encounter-sequential direction for centrality-over-time reads, project
         with undirected=false and include NEXT_ENCOUNTER (note Leiden requires
         undirected). Always clean up with gds_drop_projection.
 
-        Example: {"name": "agent_memory_full"}
+        Example: {"name": "kenning_encounter_full"}
         Example: {"name": "concepts_only", "node_types": ["Concept", "Component"], "rel_types": ["INFORMS", "ABOUT"]}
         """
         async with _tool_errors("gds_create_projection"):
@@ -706,7 +706,7 @@ def create_mcp_server(
                 RETURN gds.graph.project($name, source, target, {{}}, {config_map})
             """
 
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 lit(query), parameters_={"name": name}, routing_=RoutingControl.READ,
             )
             records = [r for r in (_value_sanitize(dict(r)) for r in result.records) if r is not None]
@@ -726,7 +726,7 @@ def create_mcp_server(
         async with _tool_errors("gds_drop_projection"):
             # YIELD specific fields: the bare `CALL gds.graph.drop` returns a
             # deprecated `schema` column and a verbose config dump. Keep it lean.
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 "CALL gds.graph.drop($name) "
                 "YIELD graphName, nodeCount, relationshipCount "
                 "RETURN graphName, nodeCount, relationshipCount",
@@ -748,7 +748,7 @@ def create_mcp_server(
     ) -> ToolResult:
         """Run PageRank — what have you come to treat as central? Not what the graph does."""
         async with _tool_errors("gds_pagerank"):
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 "CALL gds.pageRank.stream($projection) YIELD nodeId, score "
                 "RETURN gds.util.asNode(nodeId).name AS node, "
                 "labels(gds.util.asNode(nodeId))[0] AS type, score "
@@ -771,7 +771,7 @@ def create_mcp_server(
     ) -> ToolResult:
         """Run Betweenness — which Concepts bridge your lines of inquiry?"""
         async with _tool_errors("gds_betweenness"):
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 "CALL gds.betweenness.stream($projection) YIELD nodeId, score "
                 "RETURN gds.util.asNode(nodeId).name AS node, "
                 "labels(gds.util.asNode(nodeId))[0] AS type, score "
@@ -799,7 +799,7 @@ def create_mcp_server(
         chapters. Requires an undirected projection (the default).
         """
         async with _tool_errors("gds_leiden"):
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 "CALL gds.leiden.stream($projection) YIELD nodeId, communityId "
                 "RETURN gds.util.asNode(nodeId).name AS node, "
                 "labels(gds.util.asNode(nodeId))[0] AS type, communityId "
@@ -822,7 +822,7 @@ def create_mcp_server(
     ) -> ToolResult:
         """Run WCC — what did you notice and never connect? Orphans worth following up."""
         async with _tool_errors("gds_wcc"):
-            result = await agent_memory.driver.execute_query(
+            result = await kenning_encounter.driver.execute_query(
                 "CALL gds.wcc.stream($projection) YIELD nodeId, componentId "
                 "RETURN gds.util.asNode(nodeId).name AS node, "
                 "labels(gds.util.asNode(nodeId))[0] AS type, componentId "
@@ -874,7 +874,7 @@ def create_mcp_server(
         Within the waking, use the single gds_* tools for focused questions.
         """
         async with _tool_errors("orient"):
-            result = await agent_memory.orient(result_limit=result_limit)
+            result = await kenning_encounter.orient(result_limit=result_limit)
             return _json_result(result)
 
     @mcp.tool(
@@ -949,7 +949,7 @@ def create_mcp_server(
         meaning-making an infusion there would repeat. The per-tool-batch
         'delta' mode is therefore gone, not deferred. Whether a given
         invocation carries a second frame is the CALLER's judgment,
-        declared at the hook (AGENT_MEMORY_INFUSE=auto|on|off), never inferred here.
+        declared at the hook (KENNING_ENCOUNTER_INFUSE=auto|on|off), never inferred here.
 
         Governance, structurally: the payload is SIGNED (a proposal from the
         sediment, not a conclusion — an unsigned payload would be heteronomous
@@ -1004,7 +1004,7 @@ def create_mcp_server(
                     "channel": "lexical_fallback",
                     "fallback_reason": str(e),
                 }
-            result = await agent_memory.infuse(
+            result = await kenning_encounter.infuse(
                 text=text,
                 frontier_bias=(
                     infuse_frontier_bias if frontier_bias is None else frontier_bias
@@ -1140,7 +1140,7 @@ def create_mcp_server(
 
             t0 = time.perf_counter()
             if fallback:
-                arm = await agent_memory.lexical_channel_rank(text, top_n=top_n)
+                arm = await kenning_encounter.lexical_channel_rank(text, top_n=top_n)
             else:
                 matches = [
                     {
@@ -1150,7 +1150,7 @@ def create_mcp_server(
                     }
                     for i, s in enumerate(selections)
                 ]
-                arm = await agent_memory.seeded_channel_rank(
+                arm = await kenning_encounter.seeded_channel_rank(
                     matches, [s["name"] for s in selections], top_n=top_n
                 )
                 # The shared downstream labels fulltext-matched seeds
@@ -1195,8 +1195,8 @@ def create_mcp_server(
     # -- Operations Manual (the discipline, served as a resource) -------------
 
     @mcp.resource(
-        "agent-memory://howto",
-        name="Agent Memory Operations Manual",
+        "kenning-encounter://howto",
+        name="Kenning Encounter Operations Manual",
         description=(
             "The LLM-facing manual for using this substrate well — the one-graph "
             "rule, the encounter cycle, node/edge discipline, and the common "
@@ -1205,7 +1205,7 @@ def create_mcp_server(
         mime_type="application/xml",
     )
     def howto_manual() -> str:
-        """Serve the canonical Agent Memory HOWTO from inside the installed package."""
+        """Serve the canonical Kenning Encounter HOWTO from inside the installed package."""
         return _HOWTO_PATH.read_text(encoding="utf-8")
 
     return mcp
@@ -1234,12 +1234,12 @@ async def main(
     matcher_timeout_ms: int = 5000,
     matcher_sidecar: str = "models/meaning_sidecar.json",
 ) -> None:
-    logger.info("Starting Agent Memory MCP Server")
+    logger.info("Starting Kenning Encounter MCP Server")
     logger.info(f"Connecting to Neo4j at: {neo4j_uri}")
 
     neo4j_driver = AsyncGraphDatabase.driver(
         neo4j_uri, auth=(neo4j_user, neo4j_password), database=neo4j_database,
-        # The Agent Memory's schema grows over time, so cold queries legitimately
+        # Kenning Encounter's schema grows over time, so cold queries legitimately
         # reference properties / relationship types that don't exist yet (the
         # tail-find references NEXT_ENCOUNTER before there are two encounters;
         # re-entry reads reference summary/status/etc. on an empty graph).
@@ -1258,9 +1258,9 @@ async def main(
         logger.error(f"Failed to connect to Neo4j: {e}")
         exit(1)
 
-    agent_memory = Neo4jAgentMemory(neo4j_driver)
-    await agent_memory.create_fulltext_index()
-    await agent_memory.create_indexes()
+    kenning_encounter = Neo4jKenningEncounter(neo4j_driver)
+    await kenning_encounter.create_fulltext_index()
+    await kenning_encounter.create_indexes()
 
     # Startup reconcile sweep (background, non-blocking): the on-write
     # trigger covers nodes created through THIS server while it runs; the
@@ -1273,7 +1273,7 @@ async def main(
     async def _sidecar_reconcile() -> None:
         try:
             index = MeaningIndex(matcher_sidecar)
-            res = await agent_memory.driver.execute_query(
+            res = await kenning_encounter.driver.execute_query(
                 "MATCH (n) WHERE NOT n:Encounter AND n.name IS NOT NULL "
                 "RETURN n.name AS name, labels(n)[0] AS type, "
                 "       coalesce(n.description, '') AS description",
@@ -1324,7 +1324,7 @@ async def main(
     ]
 
     mcp = create_mcp_server(
-        agent_memory, namespace, read_timeout=read_timeout,
+        kenning_encounter, namespace, read_timeout=read_timeout,
         infuse_frontier_bias=infuse_frontier_bias,
         infuse_refresh_turns=infuse_refresh_turns,
         matcher_api_key=matcher_api_key,
@@ -1367,7 +1367,7 @@ async def main(
         # Best-effort: a hard kill skips this, and the unsealed set surfaced at
         # the next orient/advance catches whatever was missed.
         try:
-            marked = await agent_memory.mark_open_dissolved()
+            marked = await kenning_encounter.mark_open_dissolved()
             if marked:
                 logger.info(f"Marked dissolved at shutdown: {marked}")
         except Exception as e:

@@ -1,0 +1,59 @@
+Kenning Encounter
+Copyright 2026 Kenning AI LLC, a Washington limited liability company
+Authored by Conor O'Shea
+
+This product is developed and published by Kenning AI LLC
+(https://kenningai.com).
+
+It is distributed under the Hippocratic License, Version 3.0, with the Mass
+Surveillance (SV) ethical-standards module. The Hippocratic License is an
+ethical-source licence and is NOT an OSI-approved open-source licence. This
+project is source-available; please do not describe it as "open source." The
+full terms are in LICENSE.
+
+WHAT THE WORK IS
+
+The work is not the Python. It is the structure the Python enforces: the
+encounter chain as integrated temporal causality rather than a borrowed clock;
+the division between authored coherence edges and auto-written provenance
+edges; the reference layer that bookmarks its sources rather than copying them;
+the guarded write paths that keep the process layer closed to generic CRUD; the
+temporal assembly of delivery; and the renewal economy that governs what is
+said again. The code is the enforcement of that model. The model and its
+enforcement are one work, and attribution covers both.
+
+WHAT THE WORK DOES NOT INCLUDE
+
+Kenning Encounter does not contain the layer that would make it anticipatory —
+a graph neural network over the substrate's topology, turning accumulated recall
+into prediction. Its absence is a decision, not a gap, and WITHHELD.md says so
+in full and names it.
+
+NOTICE OBLIGATIONS
+
+Section 5.1 of the licence requires that anyone who receives this software from
+you also receives the licence, the copyright notice, and — because the Licensor
+has included them — this attribution and trademark notice, and that modified
+versions carry prominent notices stating that they were changed. Section 8.1
+makes 5.1 a condition of the rights granted, and section 7.2 ends the licence
+if a notified non-compliance is not cured within thirty days.
+
+TRADEMARKS
+
+"Kenning", "Kenning AI" and "Kenning Encounter" are trademarks of Kenning AI
+LLC. The Hippocratic License grants rights in copyright and patent only and is
+silent on trademarks, so the reservation is made here expressly rather than
+inferred from the licence. TRADEMARKS.md states what is permitted without
+asking, what is expressly not claimed — including this project's former name,
+"agent memory", and the whole vocabulary of the interface — and how to ask.
+
+The mark identifies the source of the structure. It makes no claim on what any
+instance of the structure accumulates. Your graph is authored from inside your
+deployment, by whoever is doing the accumulating, and is not ours.
+
+CITING THIS WORK
+
+See CITATION.cff. The research this software accompanies is published at
+https://www.kenningai.com/research/.
+
+Kenning AI LLC · https://kenningai.com · contact@kenningai.com

@@ -1,4 +1,4 @@
-CALL db.index.fulltext.queryNodes('agent_memory_index', $query)
+CALL db.index.fulltext.queryNodes('kenning_encounter_index', $query)
 YIELD node, score
 WITH node, score
 LIMIT $limit

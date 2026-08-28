@@ -19,7 +19,7 @@ and the startup reconcile sweep (hash- and PROMPT_VERSION-aware) rebuilds
 any gap from the graph, including a first boot from empty. This script
 writes a HOST-side file the container does not read; use it for local
 development against a bind mount, or to pre-generate a sidecar you then
-copy into the volume (docker cp <file> agent_memory-mcp:/app/models/).
+copy into the volume (docker cp <file> kenning_encounter-mcp:/app/models/).
 
 Usage (plain argv, any shell):
     uv run python scripts/build_meaning_sidecar.py
@@ -38,7 +38,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from mcp_agent_memory.meaning import MEANING_PROMPT, content_hash  # noqa: E402
+from kenning_encounter.meaning import MEANING_PROMPT, content_hash  # noqa: E402
 
 _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
 _MODEL = "gemini-3.5-flash-lite"
@@ -127,10 +127,10 @@ async def main() -> int:
     uri = args.db_url or os.environ.get("NEO4J_URL") or "bolt://localhost:7687"
     password = (
         os.environ.get("NEO4J_PASSWORD")
-        or os.environ.get("NEO4J_AGENT_MEMORY_PASSWORD") or ""
+        or os.environ.get("NEO4J_KENNING_ENCOUNTER_PASSWORD") or ""
     )
     user = os.environ.get("NEO4J_USERNAME", "neo4j")
-    database = os.environ.get("NEO4J_DATABASE", "agent_memory")
+    database = os.environ.get("NEO4J_DATABASE", "kenning_encounter")
 
     nodes = await _fetch_nodes(uri, user, password, database)
     print(f"corpus: {len(nodes)} nodes (semantic + reference, no Encounters)")

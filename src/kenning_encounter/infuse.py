@@ -17,7 +17,7 @@ Extract (focal signals), the Lucene query construction for Match, the
 conflict triage (core vs parked, by constitutive proximity), and Format
 (the signed payload) — kept pure so it is testable without a driver. The
 DB legs (fulltext match, the GDS rank streams, neighborhood/trajectory
-reads) live on Neo4jAgentMemory.infuse.
+reads) live on Neo4jKenningEncounter.infuse.
 
 Scope claim, stated honestly: this pipeline does not create the passive
 synthesis a biological substrate performs on its own — it compensates,

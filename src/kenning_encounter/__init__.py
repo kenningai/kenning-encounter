@@ -5,14 +5,14 @@ import logging
 
 from .utils import process_config
 
-logger = logging.getLogger("mcp_agent_memory")
+logger = logging.getLogger("kenning_encounter")
 logger.setLevel(logging.INFO)
 
 
 def main():
     """Main entry point for the package."""
     parser = argparse.ArgumentParser(
-        description="Agent Memory (Agent Memory) MCP Server"
+        description="Kenning Encounter (Kenning Encounter) MCP Server"
     )
     parser.add_argument("--db-url", default=None, help="Neo4j connection URL")
     parser.add_argument("--username", default=None, help="Neo4j username")

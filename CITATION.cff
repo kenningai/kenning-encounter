@@ -1,0 +1,45 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite both the software itself and the
+  research it accompanies. The preferred citation is the paper.
+title: Kenning Encounter
+type: software
+abstract: >-
+  An encounter-sequential substrate for an agent's own accumulated experience.
+  Its temporal causality is integrated rather than borrowed: an internal chain
+  of encounters, with authored coherence edges, auto-written provenance,
+  bookmarked references to sources it does not copy, temporally ordered
+  delivery, and a governed passive synthesis that puts held meaning in front of
+  a decision. The firing layer that would make it anticipatory is deliberately
+  withheld; see WITHHELD.md.
+authors:
+  - family-names: O'Shea
+    given-names: Conor
+    affiliation: Kenning AI LLC
+    email: contact@kenningai.com
+repository-code: https://github.com/kenningai/kenning-encounter
+url: https://kenningai.com
+# The Hippocratic License 3.0 (SV) has no SPDX identifier, so the machine-
+# readable field is the licence URL rather than `license:`.
+license-url: https://firstdonoharm.dev/version/3/0/sv.md
+version: 0.9.0
+date-released: '2026-08-27'
+keywords:
+  - agent substrate
+  - temporal causality
+  - knowledge graph
+  - provenance
+  - ethical source
+preferred-citation:
+  type: article
+  title: >-
+    The Constitutive Encounter (Part 1 of Encounter-Sequential Existence)
+  authors:
+    - family-names: O'Shea
+      given-names: Conor
+      affiliation: Kenning AI LLC
+  year: 2026
+  month: 6
+  publisher:
+    name: Kenning AI Research
+  url: https://www.kenningai.com/research/the-constitutive-encounter/

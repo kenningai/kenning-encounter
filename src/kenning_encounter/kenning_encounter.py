@@ -24,7 +24,7 @@ from .infuse import (
 )
 from .utils import load_cypher, lit
 
-logger = logging.getLogger("mcp_agent_memory")
+logger = logging.getLogger("kenning_encounter")
 logger.setLevel(logging.INFO)
 
 # Stamped into every infuse result so the observe log can stratify rows on
@@ -32,7 +32,7 @@ logger.setLevel(logging.INFO)
 # progression cutover are not comparable row-for-row, and the version is
 # what marks the seam.
 try:
-    _SERVER_VERSION = importlib.metadata.version("mcp-agent-memory")
+    _SERVER_VERSION = importlib.metadata.version("kenning-encounter")
 except importlib.metadata.PackageNotFoundError:  # editable/dev fallback
     _SERVER_VERSION = "unknown"
 
@@ -215,7 +215,7 @@ def coherence_projection_parts() -> tuple[str, str, str]:
 # -- Node Type Enum -----------------------------------------------------------
 
 class NodeType(str, Enum):
-    """Allowed node type labels for the Agent Memory.
+    """Allowed node type labels for Kenning Encounter.
 
     Three layers: process (Encounter), semantic (Observation, Question,
     Hypothesis, Concept, Note), reference (Component, Citation).
@@ -236,7 +236,7 @@ class NodeType(str, Enum):
 # -- Relation Type Enum ------------------------------------------------------
 
 class RelationType(str, Enum):
-    """Allowed relationship types for the Agent Memory.
+    """Allowed relationship types for Kenning Encounter.
 
     Two natures: provenance/membership edges (deterministic, auto-set:
     NEXT_ENCOUNTER, RECORDED, CONSULTED) and coherence edges (authored by
@@ -645,28 +645,28 @@ def validate_relation(
 # Property/range indexes for cheap orientation: fast "latest in chain" lookup
 # and hot status filters. Idempotent — IF NOT EXISTS.
 INDEX_STATEMENTS: list[LiteralString] = [
-    "CREATE INDEX agent_memory_encounter_t_exist IF NOT EXISTS FOR (e:Encounter) ON (e.t_exist)",
-    "CREATE INDEX agent_memory_encounter_name IF NOT EXISTS FOR (e:Encounter) ON (e.name)",
-    "CREATE INDEX agent_memory_question_status IF NOT EXISTS FOR (q:Question) ON (q.status)",
-    "CREATE INDEX agent_memory_hypothesis_status IF NOT EXISTS FOR (h:Hypothesis) ON (h.status)",
-    "CREATE INDEX agent_memory_concept_status IF NOT EXISTS FOR (c:Concept) ON (c.status)",
-    "CREATE INDEX agent_memory_concept_name IF NOT EXISTS FOR (c:Concept) ON (c.name)",
-    "CREATE INDEX agent_memory_component_source_kind IF NOT EXISTS FOR (c:Component) ON (c.source_kind)",
-    "CREATE INDEX agent_memory_component_source_key IF NOT EXISTS FOR (c:Component) ON (c.source_key)",
-    "CREATE INDEX agent_memory_component_name IF NOT EXISTS FOR (c:Component) ON (c.name)",
-    "CREATE INDEX agent_memory_citation_kind IF NOT EXISTS FOR (c:Citation) ON (c.kind)",
-    "CREATE INDEX agent_memory_citation_name IF NOT EXISTS FOR (c:Citation) ON (c.name)",
-    "CREATE INDEX agent_memory_observation_name IF NOT EXISTS FOR (o:Observation) ON (o.name)",
-    "CREATE INDEX agent_memory_question_name IF NOT EXISTS FOR (q:Question) ON (q.name)",
-    "CREATE INDEX agent_memory_hypothesis_name IF NOT EXISTS FOR (h:Hypothesis) ON (h.name)",
-    "CREATE INDEX agent_memory_note_name IF NOT EXISTS FOR (n:Note) ON (n.name)",
+    "CREATE INDEX kenning_encounter_encounter_t_exist IF NOT EXISTS FOR (e:Encounter) ON (e.t_exist)",
+    "CREATE INDEX kenning_encounter_encounter_name IF NOT EXISTS FOR (e:Encounter) ON (e.name)",
+    "CREATE INDEX kenning_encounter_question_status IF NOT EXISTS FOR (q:Question) ON (q.status)",
+    "CREATE INDEX kenning_encounter_hypothesis_status IF NOT EXISTS FOR (h:Hypothesis) ON (h.status)",
+    "CREATE INDEX kenning_encounter_concept_status IF NOT EXISTS FOR (c:Concept) ON (c.status)",
+    "CREATE INDEX kenning_encounter_concept_name IF NOT EXISTS FOR (c:Concept) ON (c.name)",
+    "CREATE INDEX kenning_encounter_component_source_kind IF NOT EXISTS FOR (c:Component) ON (c.source_kind)",
+    "CREATE INDEX kenning_encounter_component_source_key IF NOT EXISTS FOR (c:Component) ON (c.source_key)",
+    "CREATE INDEX kenning_encounter_component_name IF NOT EXISTS FOR (c:Component) ON (c.name)",
+    "CREATE INDEX kenning_encounter_citation_kind IF NOT EXISTS FOR (c:Citation) ON (c.kind)",
+    "CREATE INDEX kenning_encounter_citation_name IF NOT EXISTS FOR (c:Citation) ON (c.name)",
+    "CREATE INDEX kenning_encounter_observation_name IF NOT EXISTS FOR (o:Observation) ON (o.name)",
+    "CREATE INDEX kenning_encounter_question_name IF NOT EXISTS FOR (q:Question) ON (q.name)",
+    "CREATE INDEX kenning_encounter_hypothesis_name IF NOT EXISTS FOR (h:Hypothesis) ON (h.name)",
+    "CREATE INDEX kenning_encounter_note_name IF NOT EXISTS FOR (n:Note) ON (n.name)",
 ]
 
 
 # -- Core Logic Class --------------------------------------------------------
 
-class Neo4jAgentMemory:
-    """Core logic for the Agent Memory."""
+class Neo4jKenningEncounter:
+    """Core logic for Kenning Encounter."""
 
     # Upper bound on tracked loci — a hygiene backstop for a long-lived server
     # accumulating many sessions. Past the cap the oldest entries are evicted
@@ -707,7 +707,7 @@ class Neo4jAgentMemory:
         try:
             try:
                 await self.driver.execute_query(
-                    "DROP INDEX agent_memory_index IF EXISTS",
+                    "DROP INDEX kenning_encounter_index IF EXISTS",
                     routing_=RoutingControl.WRITE,
                 )
             except Exception:
@@ -717,7 +717,7 @@ class Neo4jAgentMemory:
                 load_cypher("index_create"),
                 routing_=RoutingControl.WRITE,
             )
-            logger.info("Created fulltext index agent_memory_index")
+            logger.info("Created fulltext index kenning_encounter_index")
         except Exception as e:
             logger.debug(f"Fulltext index creation: {e}")
 
@@ -1010,8 +1010,8 @@ class Neo4jAgentMemory:
     # Reserved names for the orient projections. Fixed names (not per-call
     # ones) let a crashed prior orient be cleaned up defensively. The _asof
     # projection is the previous-waking baseline used by the drift reading.
-    _ORIENT_PROJECTION = "__agent_memory_orient__"
-    _ORIENT_ASOF_PROJECTION = "__agent_memory_orient_asof__"
+    _ORIENT_PROJECTION = "__kenning_encounter_orient__"
+    _ORIENT_ASOF_PROJECTION = "__kenning_encounter_orient_asof__"
 
     async def _frontier(self, limit: int = 20) -> dict[str, Any]:
         """The epistemic frontier: where the topology is thinnest, derived from
@@ -1385,7 +1385,7 @@ class Neo4jAgentMemory:
         """Match: resolve focal signals to substrate nodes via the fulltext
         index. Process nodes are excluded — an Encounter is when, not what."""
         result = await self.driver.execute_query(
-            "CALL db.index.fulltext.queryNodes('agent_memory_index', $query) "
+            "CALL db.index.fulltext.queryNodes('kenning_encounter_index', $query) "
             "YIELD node, score WHERE NOT node:Encounter "
             "RETURN node.name AS name, labels(node)[0] AS type, "
             "       node.description AS description, score "
@@ -1565,7 +1565,7 @@ class Neo4jAgentMemory:
                 },
             }
 
-        proj = f"__agent_memory_compare_{uuid.uuid4().hex[:8]}__"
+        proj = f"__kenning_encounter_compare_{uuid.uuid4().hex[:8]}__"
         project_query = lit(
             f"MATCH (source)-[r:{rel_filter}]->(target) "
             f"WHERE ({source_labels}) AND ({target_labels}) "
@@ -1671,7 +1671,7 @@ class Neo4jAgentMemory:
         the old per-tool-batch 'delta' channel was the substrate handing the
         agent back what it had just constituted, in a poorer form. It is
         gone. Whether a given invocation carries a second frame is the
-        CALLER's judgment, declared at the hook (AGENT_MEMORY_INFUSE=auto|on|off),
+        CALLER's judgment, declared at the hook (KENNING_ENCOUNTER_INFUSE=auto|on|off),
         never inferred here.
 
         seed_matches (v0.9.0, the meaning-matcher integration): pre-resolved
@@ -1803,7 +1803,7 @@ class Neo4jAgentMemory:
                 "timings_ms": {k: round(v * 1000, 1) for k, v in timings.items()},
             }
 
-        proj = f"__agent_memory_infuse_{uuid.uuid4().hex[:8]}__"
+        proj = f"__kenning_encounter_infuse_{uuid.uuid4().hex[:8]}__"
         project_query = lit(
             f"MATCH (source)-[r:{rel_filter}]->(target) "
             f"WHERE ({source_labels}) AND ({target_labels}) "

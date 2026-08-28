@@ -9,8 +9,8 @@ import argparse
 
 import pytest
 
-from mcp_agent_memory.agent_memory import Neo4jAgentMemory, frontier_seed_candidates, validate_entity
-from mcp_agent_memory.infuse import (
+from kenning_encounter.kenning_encounter import Neo4jKenningEncounter, frontier_seed_candidates, validate_entity
+from kenning_encounter.infuse import (
     commit_progression,
     extract_focal_signals,
     commit_delivery,
@@ -23,7 +23,7 @@ from mcp_agent_memory.infuse import (
     renewal_partition,
     triage_conflicts,
 )
-from mcp_agent_memory.utils import process_config
+from kenning_encounter.utils import process_config
 
 from .test_server import FakeDriver
 
@@ -100,7 +100,7 @@ class TestExtract:
         out = extract_focal_signals(
             '{"type": "text", "text": "corridor annotated", '
             '"tool_use_id": "toolu_01AbCdEfGh", '
-            '"tool_name": "mcp__agent_memory__advance_encounter"} '
+            '"tool_name": "mcp__kenning_encounter__advance_encounter"} '
             "<task-notification><task-id>b452tvc2l</task-id>"
             "<tool-use-id>x</tool-use-id><output-file>y</output-file>"
         )
@@ -420,9 +420,9 @@ class TestFrontierMute:
         # The mute must hold at every candidate source, or bookkeeping
         # leaks back into payloads through the unfiltered cut.
         driver = FakeDriver()
-        agent_memory = Neo4jAgentMemory(driver)
+        kenning_encounter = Neo4jKenningEncounter(driver)
         import asyncio
-        asyncio.run(agent_memory._frontier())
+        asyncio.run(kenning_encounter._frontier())
         frontier_queries = [q for q, _ in driver.calls]
         assert len(frontier_queries) == 5
         for q in frontier_queries:
@@ -458,8 +458,8 @@ class TestInfuseOrchestration:
             ]),
             ("AS eligible", [{"eligible": []}]),
         ])
-        agent_memory = Neo4jAgentMemory(driver)
-        out = await agent_memory.infuse("something new")
+        kenning_encounter = Neo4jKenningEncounter(driver)
+        out = await kenning_encounter.infuse("something new")
         assert out["silence"] is True
         assert out["seed_mode"] == "none"
         assert not any("gds.graph.project" in q for q, _ in driver.calls)
@@ -497,8 +497,8 @@ class TestInfuseOrchestration:
                 {"encounter": "Encounter 001", "t_exist": None, "name": "obs-C"},
             ]),
         ])
-        agent_memory = Neo4jAgentMemory(driver)
-        out = await agent_memory.infuse("tell me about concept A")
+        kenning_encounter = Neo4jKenningEncounter(driver)
+        out = await kenning_encounter.infuse("tell me about concept A")
         assert out["silence"] is False
         assert out["seed_mode"] == "focal_only"
         assert out["rank_mode"] == "biased_single"
@@ -538,20 +538,20 @@ class TestInfuseOrchestration:
                  "description": "a long noticing about the thing " * 6},
             ]),
         ]
-        agent_memory = Neo4jAgentMemory(FakeDriver(script=script))
-        one = await agent_memory.infuse("about concept A", locus_key="L1")
+        kenning_encounter = Neo4jKenningEncounter(FakeDriver(script=script))
+        one = await kenning_encounter.infuse("about concept A", locus_key="L1")
         assert one["turn"] == 1
         assert one["counts"]["payload_nodes"] == 2 and one["counts"]["standing"] == 0
         assert "STANDING" not in one["payload"]
-        two = await agent_memory.infuse("about concept A again", locus_key="L1")
+        two = await kenning_encounter.infuse("about concept A again", locus_key="L1")
         assert two["turn"] == 2
         assert two["counts"]["payload_nodes"] == 0 and two["counts"]["standing"] == 2
         assert "STANDING — delivered earlier this waking" in two["payload"]
         assert len(two["payload"]) < len(one["payload"])
         # A different locus is fresh again; a stateless caller always is.
-        other = await agent_memory.infuse("about concept A", locus_key="L2")
+        other = await kenning_encounter.infuse("about concept A", locus_key="L2")
         assert other["counts"]["standing"] == 0
-        stateless = await agent_memory.infuse("about concept A")
+        stateless = await kenning_encounter.infuse("about concept A")
         assert stateless["counts"]["standing"] == 0 and stateless["turn"] == 0
 
     async def test_expansion_tier_enters_the_blend_and_can_be_disabled(self):
@@ -578,8 +578,8 @@ class TestInfuseOrchestration:
             ]),
         ]
         driver = FakeDriver(script=script)
-        agent_memory = Neo4jAgentMemory(driver)
-        out = await agent_memory.infuse("about concept A")
+        kenning_encounter = Neo4jKenningEncounter(driver)
+        out = await kenning_encounter.infuse("about concept A")
         # The already-focal name is deduped out of the expansion set.
         assert out["expansion_seeds"] == ["sibling-X"]
         assert out["expansion_bias"] == 0.5
@@ -588,7 +588,7 @@ class TestInfuseOrchestration:
         assert pairs_call["exp_bias"] == 0.5
         # OFF arm: bias 0 issues no expansion query at all.
         driver2 = FakeDriver(script=script)
-        out2 = await Neo4jAgentMemory(driver2).infuse(
+        out2 = await Neo4jKenningEncounter(driver2).infuse(
             "about concept A", expansion_bias=0.0
         )
         assert out2["expansion_seeds"] == []
@@ -609,8 +609,8 @@ class TestInfuseOrchestration:
                 {"name": "concept-A", "type": "Concept", "description": "d"},
             ]),
         ]
-        agent_memory = Neo4jAgentMemory(FakeDriver(script=script))
-        one = await agent_memory.infuse("concept A", locus_key="L9")
+        kenning_encounter = Neo4jKenningEncounter(FakeDriver(script=script))
+        one = await kenning_encounter.infuse("concept A", locus_key="L9")
         assert one["renewal"]["fresh"] == ["concept-A"]
         assert one["renewal"]["standing"] == []
         # v0.7.1: selection and delivery are reported separately, and with a
@@ -620,7 +620,7 @@ class TestInfuseOrchestration:
         assert one["renewal"]["body_origin"]["concept-A"] in {
             "focal", "expansion", "frontier", "ranked"
         }
-        two = await agent_memory.infuse("concept A", locus_key="L9")
+        two = await kenning_encounter.infuse("concept A", locus_key="L9")
         assert two["renewal"]["fresh"] == []
         assert two["renewal"]["standing"] == ["concept-A"]
         assert two["renewal"]["delivered_handles"] == ["concept-A"]
@@ -680,9 +680,9 @@ class TestInfuseOrchestration:
             ("AS eligible", [{"eligible": ["concept-A"]}]),
             ("AS pairs", [{"node": "concept-A", "type": "Concept", "score": 0.9}]),
         ])
-        agent_memory = Neo4jAgentMemory(driver)
+        kenning_encounter = Neo4jKenningEncounter(driver)
         with pytest.raises(RuntimeError, match="gds fell over"):
-            await agent_memory.infuse("boom")
+            await kenning_encounter.infuse("boom")
         assert any("gds.graph.drop" in q for q, _ in driver.calls)
 
 

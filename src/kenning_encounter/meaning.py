@@ -23,7 +23,7 @@ STATUS AND BOUNDARIES (shipped in v0.9.0 after the T0 gates passed — recall
     (frontier bias, B2 expansion, biased rank, triage, assembly, renewal)
     is unchanged, and infuse_meaning remains as the diagnostic surface.
   - SIDECAR, NEVER NODE PROPERTIES — settled, self-constitutively: the
-    Agent Memory's contents are authored by the agent, and machine-generated text
+    Kenning Encounter's contents are authored by the agent, and machine-generated text
     stored inside its nodes would be another voice in its own. The sidecar
     serves the identical retrieval function and keeps the graph authored.
     It lives in the stack's named volume and MAINTAINS ITSELF: the

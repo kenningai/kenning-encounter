@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference hook client for the governed infusion pipeline.
 
-Wires a Claude Code harness to the Agent Memory server's `infuse` tool at the ONE
+Wires a Claude Code harness to the Kenning Encounter server's `infuse` tool at the ONE
 injection point it has (the once-per-waking orientation read stays with the
 SessionStart re-entry hook):
 
@@ -28,12 +28,12 @@ resolve to an ancient system interpreter):
   {
     "hooks": {
       "UserPromptSubmit": [{ "hooks": [{ "type": "command",
-        "command": "/absolute/path/to/python3 /path/to/scripts/agent_memory_infuse_hook.py" }] }]
+        "command": "/absolute/path/to/python3 /path/to/scripts/kenning_encounter_infuse_hook.py" }] }]
     }
   }
 
-Configuration: AGENT_MEMORY_MCP_URL (default http://127.0.0.1:8003/mcp/) or --url;
-AGENT_MEMORY_INFUSE_TIMEOUT seconds (default 10.0) or --timeout. The default budget
+Configuration: KENNING_ENCOUNTER_MCP_URL (default http://127.0.0.1:8003/mcp/) or --url;
+KENNING_ENCOUNTER_INFUSE_TIMEOUT seconds (default 10.0) or --timeout. The default budget
 covers the COLD first call of a session: rank against a cold Neo4j page cache
 costs roughly 10x the warm call, and the first prompt is exactly when
 re-entry matters — a budget sized to the warm call fails silently at the one
@@ -48,14 +48,14 @@ Design constraints, from the spec:
 
 Shadow mode (--shadow): compute everything, inject nothing. Every result —
 payload, seed_mode, counts, suppression, timings — is appended as one JSON
-line to AGENT_MEMORY_INFUSE_SHADOW_LOG (default ~/.claude/agent_memory-infuse-shadow.jsonl)
+line to KENNING_ENCOUNTER_INFUSE_SHADOW_LOG (default ~/.claude/kenning_encounter-infuse-shadow.jsonl)
 and stdout stays empty. This is the zero-constitutive-risk dress rehearsal:
 run the wired hooks in shadow for a few wakings against the live substrate
 to observe seed quality, real-graph latency, and the
 parked-tensions register at scale, BEFORE the first governed payload is
 allowed to condition a live write.
 
-Observation log (AGENT_MEMORY_INFUSE_OBSERVE_LOG=<path>): when set, EVERY call —
+Observation log (KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG=<path>): when set, EVERY call —
 injected or silent — appends the same full record (plus an `injected`
 flag) to <path>, independent of shadow mode. This is the out-of-band
 measurement stream for the infusion experiment: the harness transcript
@@ -84,7 +84,7 @@ import sys
 MIN_PYTHON = (3, 12)
 if sys.version_info < MIN_PYTHON:
     sys.stderr.write(
-        f"agent_memory_infuse_hook: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, "
+        f"kenning_encounter_infuse_hook: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, "
         f"running {sys.version.split()[0]} ({sys.executable}) — wire the hook "
         "to an absolute path of a supported interpreter.\n")
     sys.exit(0)
@@ -98,19 +98,19 @@ import tempfile
 import time
 import urllib.request
 
-DEFAULT_URL = os.environ.get("AGENT_MEMORY_MCP_URL", "http://127.0.0.1:8003/mcp/")
-TIMEOUT_S = float(os.environ.get("AGENT_MEMORY_INFUSE_TIMEOUT", "10.0"))
+DEFAULT_URL = os.environ.get("KENNING_ENCOUNTER_MCP_URL", "http://127.0.0.1:8003/mcp/")
+TIMEOUT_S = float(os.environ.get("KENNING_ENCOUNTER_INFUSE_TIMEOUT", "10.0"))
 # Trajectory (v0.9.0, the meaning matcher): full-mode selection reads the
 # session's arc, not a snapshot — meaning is temporal, and a 13-word prompt
 # under-determines it. The hook parses the harness transcript HOST-SIDE
 # (the server runs in a container without access to ~/.claude) and passes
 # the last N user turns alongside the prompt. 0 disables.
-TRAJECTORY_TURNS = int(os.environ.get("AGENT_MEMORY_INFUSE_TRAJECTORY_TURNS", "7"))
+TRAJECTORY_TURNS = int(os.environ.get("KENNING_ENCOUNTER_INFUSE_TRAJECTORY_TURNS", "7"))
 SHADOW_LOG = os.environ.get(
-    "AGENT_MEMORY_INFUSE_SHADOW_LOG",
-    os.path.expanduser("~/.claude/agent_memory-infuse-shadow.jsonl"),
+    "KENNING_ENCOUNTER_INFUSE_SHADOW_LOG",
+    os.path.expanduser("~/.claude/kenning_encounter-infuse-shadow.jsonl"),
 )
-OBSERVE_LOG = os.environ.get("AGENT_MEMORY_INFUSE_OBSERVE_LOG")  # unset = no observation
+OBSERVE_LOG = os.environ.get("KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG")  # unset = no observation
 
 # ---------------------------------------------------------------------------
 # The switch: infusion belongs to a prompt somebody WROTE.
@@ -139,7 +139,7 @@ OBSERVE_LOG = os.environ.get("AGENT_MEMORY_INFUSE_OBSERVE_LOG")  # unset = no ob
 # design's own "silence is a valid injection" principle applied one level
 # earlier.
 #
-# AGENT_MEMORY_INFUSE is a SWITCH, not a mode — there is only one thing to infuse:
+# KENNING_ENCOUNTER_INFUSE is a SWITCH, not a mode — there is only one thing to infuse:
 #   auto (default) — the entrypoint gate above: on for a written prompt,
 #                    off for a scheduled trigger.
 #   on             — infuse regardless. For an invocation the operator KNOWS
@@ -150,7 +150,7 @@ OBSERVE_LOG = os.environ.get("AGENT_MEMORY_INFUSE_OBSERVE_LOG")  # unset = no ob
 # The switch says WHETHER; the recorded skip_reason says WHY. Per-process by
 # construction, so the same deployment can answer differently per invocation.
 INTERACTIVE_ENTRYPOINTS = frozenset({"cli"})
-INFUSE_SWITCH = os.environ.get("AGENT_MEMORY_INFUSE", "auto").lower()
+INFUSE_SWITCH = os.environ.get("KENNING_ENCOUNTER_INFUSE", "auto").lower()
 
 
 def infusion_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
@@ -162,7 +162,7 @@ def infusion_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
     three times, and the observe log is where it gets caught.
     """
     env = os.environ if env is None else env
-    switch = (env.get("AGENT_MEMORY_INFUSE", INFUSE_SWITCH) or "auto").lower()
+    switch = (env.get("KENNING_ENCOUNTER_INFUSE", INFUSE_SWITCH) or "auto").lower()
     if switch == "on":
         return True, "switch=on"
     if switch == "off":
@@ -207,7 +207,7 @@ def _post(url: str, payload: dict, session_id: str | None) -> tuple[dict | None,
 
 def _session_cache_path(url: str, harness_session: str) -> str:
     key = hashlib.sha256(f"{url}|{harness_session}".encode()).hexdigest()[:16]
-    return os.path.join(tempfile.gettempdir(), f"agent_memory-infuse-{key}.session")
+    return os.path.join(tempfile.gettempdir(), f"kenning_encounter-infuse-{key}.session")
 
 
 def _initialize(url: str) -> str | None:
@@ -220,7 +220,7 @@ def _initialize(url: str) -> str | None:
             "params": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "agent_memory-infuse-hook", "version": "0.10.0"},
+                "clientInfo": {"name": "kenning_encounter-infuse-hook", "version": "0.10.0"},
             },
         },
         None,
@@ -325,7 +325,7 @@ class _SilentParser(argparse.ArgumentParser):
     """
 
     def error(self, message: str):
-        sys.stderr.write(f"agent_memory-infuse-hook: {message}\n")
+        sys.stderr.write(f"kenning_encounter-infuse-hook: {message}\n")
         raise SystemExit(0)
 
 
@@ -335,7 +335,7 @@ def main() -> int:
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument(
         "--timeout", type=float, default=None,
-        help="Request timeout in seconds (overrides AGENT_MEMORY_INFUSE_TIMEOUT; "
+        help="Request timeout in seconds (overrides KENNING_ENCOUNTER_INFUSE_TIMEOUT; "
              "default 10 — sized to the cold first call, not the warm repeat).",
     )
     parser.add_argument(

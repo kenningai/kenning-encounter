@@ -1,12 +1,12 @@
-"""Unit tests for mcp-agent-memory.
+"""Unit tests for kenning-encounter.
 
 Tests validation logic without requiring a Neo4j instance.
 """
 
 import pytest
 
-from mcp_agent_memory.agent_memory import (
-    Neo4jAgentMemory,
+from kenning_encounter.kenning_encounter import (
+    Neo4jKenningEncounter,
     NodeType,
     RelationType,
     validate_entity,
@@ -21,7 +21,7 @@ from mcp_agent_memory.agent_memory import (
     compute_drift,
     compute_weave_audit,
 )
-from mcp_agent_memory.utils import format_namespace
+from kenning_encounter.utils import format_namespace
 
 
 # -- Fake driver (DB-free) ----------------------------------------------------
@@ -382,8 +382,8 @@ class TestRelationValidation:
 class TestUtils:
     def test_format_namespace(self):
         assert format_namespace("") == ""
-        assert format_namespace("agent_memory") == "agent_memory-"
-        assert format_namespace("agent_memory-") == "agent_memory-"
+        assert format_namespace("kenning_encounter") == "kenning_encounter-"
+        assert format_namespace("kenning_encounter-") == "kenning_encounter-"
 
 
 # -- Schema Completeness Tests ------------------------------------------------
@@ -457,53 +457,53 @@ class TestLocusScopedWrites:
 
     pytestmark = pytest.mark.asyncio
 
-    def _agent_memory(self, extra_script=None):
+    def _kenning_encounter(self, extra_script=None):
         script = [(_ADVANCE, [dict(_ADVANCE_RECORD)])] + (extra_script or [])
-        return Neo4jAgentMemory(FakeDriver(script))  # type: ignore[arg-type]
+        return Neo4jKenningEncounter(FakeDriver(script))  # type: ignore[arg-type]
 
     async def test_first_of_locus_has_no_predecessor(self):
-        agent_memory = self._agent_memory()
-        await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
-        _, params = _advance_call(agent_memory.driver)
+        kenning_encounter = self._kenning_encounter()
+        await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
+        _, params = _advance_call(kenning_encounter.driver)
         assert params["pred_eid"] is None
 
     async def test_advance_chains_from_own_previous_encounter(self):
-        agent_memory = self._agent_memory()
-        await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
-        await agent_memory.advance_encounter(name="E2", locus_key="locus-A")
-        _, params = _advance_call(agent_memory.driver)
+        kenning_encounter = self._kenning_encounter()
+        await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
+        await kenning_encounter.advance_encounter(name="E2", locus_key="locus-A")
+        _, params = _advance_call(kenning_encounter.driver)
         assert params["pred_eid"] == "eid-1"
 
     async def test_parallel_locus_never_chains_from_sibling(self):
-        agent_memory = self._agent_memory()
-        await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
-        await agent_memory.advance_encounter(name="E2", locus_key="locus-B")
-        _, params = _advance_call(agent_memory.driver)
+        kenning_encounter = self._kenning_encounter()
+        await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
+        await kenning_encounter.advance_encounter(name="E2", locus_key="locus-B")
+        _, params = _advance_call(kenning_encounter.driver)
         assert params["pred_eid"] is None  # B roots its own branch
 
     async def test_advance_without_locus_key_roots_and_stores_nothing(self):
-        agent_memory = self._agent_memory()
-        await agent_memory.advance_encounter(name="E1")
-        _, params = _advance_call(agent_memory.driver)
+        kenning_encounter = self._kenning_encounter()
+        await kenning_encounter.advance_encounter(name="E1")
+        _, params = _advance_call(kenning_encounter.driver)
         assert params["pred_eid"] is None
-        assert agent_memory._locus_open == {}
+        assert kenning_encounter._locus_open == {}
 
     async def test_advance_stores_locus_state(self):
-        agent_memory = self._agent_memory()
-        await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
-        assert agent_memory._locus_open == {"locus-A": "eid-1"}
+        kenning_encounter = self._kenning_encounter()
+        await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
+        assert kenning_encounter._locus_open == {"locus-A": "eid-1"}
 
     async def test_advance_surfaces_genesis_anchor(self):
         # The genesis binding rides the payload: a locus root reports which
         # encounter was latest when its locus began.
         record = dict(_ADVANCE_RECORD, genesis_anchor="E0")
-        agent_memory = Neo4jAgentMemory(FakeDriver([(_ADVANCE, [record])]))  # type: ignore[arg-type]
-        result = await agent_memory.advance_encounter(name="E1", locus_key="locus-B")
+        kenning_encounter = Neo4jKenningEncounter(FakeDriver([(_ADVANCE, [record])]))  # type: ignore[arg-type]
+        result = await kenning_encounter.advance_encounter(name="E1", locus_key="locus-B")
         assert result["encounter"]["genesis_anchor"] == "E0"
 
     async def test_reentry_payload_carries_unsealed_set(self):
-        agent_memory = self._agent_memory()
-        result = await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
+        kenning_encounter = self._kenning_encounter()
+        result = await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
         assert "unsealed" in result["reentry"]
         assert "dissolution" not in result["reentry"]
 
@@ -511,93 +511,93 @@ class TestLocusScopedWrites:
         # The chain predecessor survives the seal: one session holds many
         # sealed work-units, each chaining from the last. Only the write
         # target (_locus_open) ends at the seal.
-        agent_memory = self._agent_memory(extra_script=[
+        kenning_encounter = self._kenning_encounter(extra_script=[
             (_CLOSE, [{"name": "E1", "t_exist": None, "summary": "x", "report": None}]),
             (_RESOLVE_BY_EID, [{"name": "E1", "eid": "eid-1"}]),
         ])
-        await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
-        await agent_memory.close_encounter(summary="x", locus_key="locus-A")
-        await agent_memory.advance_encounter(name="E2", locus_key="locus-A")
-        _, params = _advance_call(agent_memory.driver)
+        await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
+        await kenning_encounter.close_encounter(summary="x", locus_key="locus-A")
+        await kenning_encounter.advance_encounter(name="E2", locus_key="locus-A")
+        _, params = _advance_call(kenning_encounter.driver)
         assert params["pred_eid"] == "eid-1"
 
     async def test_close_without_locus_or_handle_refuses(self):
-        agent_memory = self._agent_memory()
+        kenning_encounter = self._kenning_encounter()
         with pytest.raises(ValueError, match="No open Encounter for this locus"):
-            await agent_memory.close_encounter(summary="x")
+            await kenning_encounter.close_encounter(summary="x")
 
     async def test_close_seals_own_encounter_and_clears_state(self):
-        agent_memory = self._agent_memory(extra_script=[
+        kenning_encounter = self._kenning_encounter(extra_script=[
             (_CLOSE, [{"name": "E1", "t_exist": None, "summary": "x", "report": None}]),
             (_RESOLVE_BY_EID, [{"name": "E1", "eid": "eid-1"}]),
         ])
-        await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
-        result = await agent_memory.close_encounter(summary="x", locus_key="locus-A")
+        await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
+        result = await kenning_encounter.close_encounter(summary="x", locus_key="locus-A")
         assert result["name"] == "E1"
-        assert agent_memory._locus_open == {}
-        close_calls = [(q, p) for q, p in agent_memory.driver.calls if _CLOSE in q]
+        assert kenning_encounter._locus_open == {}
+        close_calls = [(q, p) for q, p in kenning_encounter.driver.calls if _CLOSE in q]
         assert close_calls[-1][1]["eid"] == "eid-1"
 
     async def test_close_by_explicit_handle(self):
-        agent_memory = self._agent_memory(extra_script=[
+        kenning_encounter = self._kenning_encounter(extra_script=[
             (_CLOSE, [{"name": "E9", "t_exist": None, "summary": "x", "report": None}]),
             (_RESOLVE_BY_NAME, [{"name": "E9", "eid": "eid-9"}]),
         ])
-        result = await agent_memory.close_encounter(summary="x", encounter="E9")
+        result = await kenning_encounter.close_encounter(summary="x", encounter="E9")
         assert result["name"] == "E9"
-        close_calls = [(q, p) for q, p in agent_memory.driver.calls if _CLOSE in q]
+        close_calls = [(q, p) for q, p in kenning_encounter.driver.calls if _CLOSE in q]
         assert close_calls[-1][1]["eid"] == "eid-9"
 
     async def test_ambiguous_handle_refuses(self):
-        agent_memory = self._agent_memory(extra_script=[
+        kenning_encounter = self._kenning_encounter(extra_script=[
             (_RESOLVE_BY_NAME, [
                 {"name": "E9", "eid": "eid-9a"},
                 {"name": "E9", "eid": "eid-9b"},
             ]),
         ])
         with pytest.raises(ValueError, match="ambiguous"):
-            await agent_memory.close_encounter(summary="x", encounter="E9")
+            await kenning_encounter.close_encounter(summary="x", encounter="E9")
 
     async def test_create_entities_without_locus_refuses_with_guard_message(self):
-        agent_memory = self._agent_memory()
+        kenning_encounter = self._kenning_encounter()
         with pytest.raises(ValueError, match="has not advanced or has already closed"):
-            await agent_memory.create_entities(
+            await kenning_encounter.create_entities(
                 [{"type": "Note", "name": "n", "description": "d"}]
             )
 
     async def test_delete_entities_refuses_encounter(self):
         # The spine is the record of lived time, not editable content.
-        agent_memory = self._agent_memory(extra_script=[
+        kenning_encounter = self._kenning_encounter(extra_script=[
             ("OPTIONAL MATCH (n)-[r]-()", [{
                 "type": "Encounter", "name": "E1",
                 "description": None, "rel_count": 3,
             }]),
         ])
         with pytest.raises(ValueError, match="No tool deletes the spine"):
-            await agent_memory.delete_entities(["E1"])
+            await kenning_encounter.delete_entities(["E1"])
 
     async def test_delete_cypher_excludes_process_labels_structurally(self):
         # Names are not unique across labels: even if the preview matches a
         # same-named semantic node, the sweep must not touch the spine.
-        agent_memory = self._agent_memory(extra_script=[
+        kenning_encounter = self._kenning_encounter(extra_script=[
             ("OPTIONAL MATCH (n)-[r]-()", [{
                 "type": "Note", "name": "shared-name",
                 "description": "d", "rel_count": 0,
             }]),
             ("DETACH DELETE n", [{"deleted": 1}]),
         ])
-        await agent_memory.delete_entities(["shared-name"])
-        delete_calls = [q for q, _ in agent_memory.driver.calls if "DETACH DELETE n" in q]
+        await kenning_encounter.delete_entities(["shared-name"])
+        delete_calls = [q for q, _ in kenning_encounter.driver.calls if "DETACH DELETE n" in q]
         assert delete_calls and "NOT n:`Encounter`" in delete_calls[-1]
 
     async def test_mark_open_dissolved_marks_and_clears(self):
-        agent_memory = self._agent_memory(extra_script=[
+        kenning_encounter = self._kenning_encounter(extra_script=[
             (_MARK_DISSOLVED, [{"name": "E1"}]),
         ])
-        await agent_memory.advance_encounter(name="E1", locus_key="locus-A")
-        marked = await agent_memory.mark_open_dissolved()
+        await kenning_encounter.advance_encounter(name="E1", locus_key="locus-A")
+        marked = await kenning_encounter.mark_open_dissolved()
         assert marked == ["E1"]
-        assert agent_memory._locus_open == {}
+        assert kenning_encounter._locus_open == {}
 
 
 # -- Orient panel math (v0.4.0) ------------------------------------------------
