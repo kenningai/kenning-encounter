@@ -238,3 +238,50 @@ class TestStaleWiringCannotBlockTheTurn:
         assert recs, "the call must still be observable"
         assert recs[0]["unknown_args"] == ["--mode", "delta"], \
             "a swallowed flag is indistinguishable from a broken guard"
+
+
+class TestTheDurableIdentityReachesTheLedger:
+    """v0.12.4 — the hook has always known the harness session id, and used it
+    to key its own transport-session cache file. It never sent it.
+
+    So the server keyed the renewal ledger on the MCP TRANSPORT session, which
+    dies with the connection where the locus does not. v0.12.0 made the locus
+    survive a restart and a /resume; the ledger tracking what that locus had
+    already been told did not follow. The consequence is the pathology this
+    module's own docstring describes, arriving one level in: a mid-waking
+    restart re-delivers the same bodies at full weight into a conversation
+    that still holds them."""
+
+    def _sent(self, harness_session):
+        captured = {}
+
+        def fake_post(url, payload, sid):
+            if payload.get("method") == "tools/call":
+                captured.update(payload["params"]["arguments"])
+            return {"result": {"content": [{"text": "{}"}]}}, sid
+
+        original = hook._post
+        hook._post = fake_post
+        try:
+            hook._call_infuse(
+                "http://x", "transport-1", "a prompt",
+                None, harness_session,
+            )
+        finally:
+            hook._post = original
+        return captured
+
+    def test_the_harness_session_is_sent_as_session_id(self):
+        assert self._sent("harness-abc")["session_id"] == "harness-abc"
+
+    def test_it_is_not_the_transport_session(self):
+        """The two are different identities and the bug was conflating them."""
+        assert self._sent("harness-abc")["session_id"] != "transport-1"
+
+    def test_absent_identity_sends_no_key_rather_than_an_empty_one(self):
+        """A client with no harness session degrades to the transport-keyed
+        ledger — honest, and what v0.12.3 says a non-Claude-Code harness
+        gets. An empty string would collapse every such client into one
+        shared ledger, which is worse than having none."""
+        assert "session_id" not in self._sent(None)
+        assert "session_id" not in self._sent("")

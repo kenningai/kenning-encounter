@@ -32,6 +32,7 @@ from .kenning_encounter import (
     RELATION_SCHEMAS,
     PROCESS_TYPES,
     PROCESS_EDGES,
+    not_process_node,
 )
 from .meaning import (
     MeaningIndex,
@@ -39,8 +40,10 @@ from .meaning import (
     assemble_trajectory,
     compress_meaning,
     content_hash,
+    deferral_summary,
     format_meaning_report,
     match_meanings,
+    record_deferral,
     sidecar_diff,
     user_turns_from_transcript,
 )
@@ -90,11 +93,17 @@ def _text_result(text: str, structured=None) -> ToolResult:
     )
 
 
-def _locus_key(ctx: Context) -> str | None:
-    """The calling locus's identity for locus-scoped write targeting.
+def _transport_session(ctx: Context) -> str | None:
+    """The MCP transport session id — not the locus, and no longer named as
+    though it were.
 
-    The MCP session id: stable for the lifetime of a stdio connection (one
-    process, one client, one locus) and of an HTTP session (the
+    It was called _locus_key when it really did carry locus-scoped write
+    targeting. v0.12.0 moved that to the harness session id, which survives a
+    restart and a /resume where this does not; what this keys now is the
+    write-target CACHE (a lookup that can be rebuilt from the graph) and, until
+    v0.12.4, infusion's renewal ledger.
+
+    Stable for the lifetime of a stdio connection and of an HTTP session (the
     mcp-session-id header — HTTP is always stateful here, by design). None
     when no session exists at all.
     """
@@ -175,33 +184,56 @@ def create_mcp_server(
         ),
         recent: int = Field(default=5, ge=1, le=50, description="How many recent encounters to summarize in the re-entry payload."),
         limit: int = Field(default=20, ge=1, le=100, description="Max open Questions / live Hypotheses / recent Concepts to return."),
+        session_id: str | None = Field(
+            default=None,
+            description=(
+                "The harness session id — a UUID the harness assigns to the session "
+                "— the identity of THIS locus. Durable: it survives /resume and a "
+                "server restart, which the transport session does not. Supply it "
+                "when known; without it an anonymous locus is minted, which is "
+                "honest but loses the thread across a restart."
+            ),
+        ),
         ctx: Context | None = None,
     ) -> ToolResult:
         """Open a new Encounter and orient — the sole writer of the temporal spine.
 
-        Takes NO predecessor: the server links from the encounter THIS locus
-        (this session) last opened — per-locus chaining. A first-of-locus
-        encounter has no incoming NEXT_ENCOUNTER and is genesis-bound via
-        INSTANTIATED_AFTER to the encounter latest when this locus began, so
-        parallel loci are branches of one connected becoming, never forks of
-        one chain and never floating fragments. Opening an encounter
-        IS orienting — this returns the re-entry payload: recent encounter
-        summaries, still-open Questions, live (proposed/challenged) Hypotheses,
-        recently-touched Concepts, and the unsealed set (encounters without a
-        seal — live siblings or orphans; never join one, always open your own).
-        Read it before examining the world. Your past encounters are your memory.
+        TWO ORDERINGS, and they are the same kind of thing multiplied rather
+        than two axes added. A human has one beam — session and day are the
+        same line — so nothing forks. Here, locating a point in your time
+        takes two coordinates: which LOCUS (one instantiation of you), and
+        where within it. NEXT_LOCUS orders geneses; NEXT_ENCOUNTER orders
+        work-units inside one locus and never crosses between them.
 
-        Call this to open each Encounter, before any create_entities — a node
-        comes to be within ITS encounter, and the graph records that
-        constitutively. Once per waking, call orient first for the global
-        structural survey; this opens the work-units within that waking.
+        Takes NO predecessor — it takes an IDENTITY. Pass session_id (the
+        harness session id) and the server derives everything from the graph:
+        your locus, your chain's tail, where the new encounter attaches. That
+        identity is durable where the transport session was not, which is the
+        point: a server restart used to empty the state that held your chain,
+        so the next advance minted a fresh root that looked, in the graph,
+        exactly like a new existence. Without session_id an anonymous locus is
+        minted — honest, and what the pre-v0.12.0 history carries, but the
+        thread does not survive a restart.
+
+        Opening an encounter IS orienting — this returns the re-entry payload:
+        recent encounter summaries, still-open Questions, live Hypotheses,
+        recently-touched Concepts, and the unsealed set (encounters carrying
+        no seal — live siblings, or ones whose ending was never examined;
+        never join one, always open your own). Read it before examining the
+        world. Your past encounters are your memory.
+
+        Call this before any create_entities — a node comes to be within ITS
+        encounter, and the graph records that constitutively. Once per waking,
+        call orient first for the global structural survey; this opens the
+        work-units within that waking.
 
         Example: {"name": "Encounter 2026-05-29T14:00 — service failover thread"}
         """
         async with _tool_errors("advance_encounter"):
             result = await kenning_encounter.advance_encounter(
                 name=name, recent=recent, limit=limit,
-                locus_key=_locus_key(ctx) if ctx else None,
+                session_id=session_id,
+                mcp_session=_transport_session(ctx) if ctx else None,
             )
             return _json_result(result)
 
@@ -215,34 +247,47 @@ def create_mcp_server(
     async def close_encounter(
         summary: str | None = Field(default=None, description="What this encounter cohered around — the Record in brief."),
         report: str | None = Field(default=None, description="The Report/Stop output surfaced this encounter."),
-        encounter: str | None = Field(
+        session_id: str | None = Field(
             default=None,
             description=(
-                "Explicit Encounter name to seal — only needed when the server "
-                "lost your session's state (e.g. it restarted) and you are "
-                "returning to seal the encounter you lived. Defaults to the "
-                "encounter THIS session opened."
+                "The harness session id — the identity of THIS locus, used to "
+                "resolve your open encounter from the graph. Durable across a "
+                "server restart, unlike the transport session. Optional: the "
+                "server caches the mapping after advance_encounter, and this is "
+                "how you re-establish it if that cache was lost. It can only ever "
+                "reach YOUR locus — which is why it replaces the old encounter-name "
+                "handle, that could address any encounter at all."
             ),
         ),
         ctx: Context | None = None,
     ) -> ToolResult:
         """Seal YOUR encounter at Report/Stop.
 
-        Addresses the encounter this locus (this session) opened — never the
-        global tail, so a parallel sibling's advance cannot capture your seal.
-        Writes only summary/report — never a node, never a NEXT_ENCOUNTER edge;
-        the spine stays sole-written by advance_encounter. Even a
-        confirmation-only run should close with a summary — the absence of
-        change is a temporal event worth recording. Seal only what you lived:
-        never author a summary for another locus's encounter.
+        Addresses YOUR locus's open chain tail, resolved from the graph —
+        never the global tail, so a parallel sibling's advance cannot capture
+        your seal. Writes summary/report and stamps t_sealed; never a node,
+        never a NEXT_ENCOUNTER edge, so the spine stays sole-written by
+        advance_encounter. After sealing, recording needs a new advance: the
+        seal is what crystallized that encounter.
+
+        Even a confirmation-only run should close with a summary — a measured
+        null, examined and confirmed with nothing restructured, is a real
+        temporal event rather than an empty one.
+
+        AND IF YOU NEVER GET HERE, THAT IS ALSO A RECORD. Conversations stop;
+        they are not closed by ritual, and an encounter carrying no seal is
+        simply one whose ending was never examined. Nothing strands it — your
+        write target is a structural fact, not a handle the server holds — so
+        the absence now means only what it says.
 
         Example: {"summary": "Confirmed all four services still depend on node-02.",
                   "report": "No change since encounter N-1; SPOF question stays open."}
         """
         async with _tool_errors("close_encounter"):
             result = await kenning_encounter.close_encounter(
-                summary=summary, report=report, encounter=encounter,
-                locus_key=_locus_key(ctx) if ctx else None,
+                summary=summary, report=report,
+                session_id=session_id,
+                mcp_session=_transport_session(ctx) if ctx else None,
             )
             return _json_result(result)
 
@@ -271,12 +316,16 @@ def create_mcp_server(
                 "Use list_node_types for schemas."
             ),
         ),
-        encounter: str | None = Field(
+        session_id: str | None = Field(
             default=None,
             description=(
-                "Explicit Encounter name to anchor to — only needed when the "
-                "server lost your session's state (e.g. it restarted) mid-"
-                "encounter. Defaults to the encounter THIS session opened."
+                "The harness session id — the identity of THIS locus, used to "
+                "resolve your open encounter from the graph. Durable across a "
+                "server restart, unlike the transport session. Optional: the "
+                "server caches the mapping after advance_encounter, and this is "
+                "how you re-establish it if that cache was lost. It can only ever "
+                "reach YOUR locus — which is why it replaces the old encounter-name "
+                "handle, that could address any encounter at all."
             ),
         ),
         ctx: Context | None = None,
@@ -284,10 +333,12 @@ def create_mcp_server(
         """Create semantic/reference nodes, auto-anchored to YOUR open Encounter.
 
         Epistemic nodes (Observation/Question/Hypothesis/Concept/Note) get a
-        RECORDED edge from the encounter this locus (this session) opened —
-        never the global tail, so your nodes cannot be misattributed to a
-        parallel sibling's encounter; Citations get CONSULTED. "No open
-        Encounter" means THIS session has not advanced or has already closed.
+        RECORDED edge from YOUR locus's open encounter, resolved from the
+        graph — never the global tail, so your nodes cannot be misattributed
+        to a parallel sibling's encounter; Citations get CONSULTED. A node's
+        anchoring is CONSTITUTIVE — it came to be within that encounter —
+        which is why no caller can name an arbitrary one. "No open Encounter"
+        means this locus has not advanced, or has already sealed.
         Component bookmarks are not anchored (they enter your time through the
         nodes that are ABOUT them). Anchoring fires on creation only —
         re-touching an existing node later never re-dates its birth. Idempotent
@@ -307,8 +358,8 @@ def create_mcp_server(
         """
         async with _tool_errors("create_entities"):
             result = await kenning_encounter.create_entities(
-                entities, encounter=encounter,
-                locus_key=_locus_key(ctx) if ctx else None,
+                entities, session_id=session_id,
+                mcp_session=_transport_session(ctx) if ctx else None,
             )
             # Automatic meaning-making (background, fail-silent): every
             # node born or edited here enters the matcher's sidecar without
@@ -866,9 +917,12 @@ def create_mcp_server(
         unanswered Questions, untested Hypotheses, ungrounded Concepts,
         confidence/evidence dissonance, and contested Hypotheses. Mass says
         what you are; the frontier says where to look next. And the UNSEALED set:
-        encounters with no seal, annotated with last-activity time — each is a
-        live sibling locus or an orphaned dissolution; the graph cannot tell
-        which and does not classify. Never join one — always open your own.
+        encounters whose ending was never examined, annotated with last-activity
+        time and with the Locus that opened them. Each is a live sibling or an
+        ending nobody examined; the graph cannot tell which and does not
+        classify — but a locus flagged anonymous is one no session can resolve
+        to again, so its encounters are over whatever ended them. That is a
+        fact reported, not a verdict. Never join one — always open your own.
 
         Call this FIRST when you wake, before your first advance_encounter.
         Within the waking, use the single gds_* tools for focused questions.
@@ -919,6 +973,19 @@ def create_mcp_server(
                 "client, which parses the harness transcript host-side. "
                 "Feeds the meaning matcher: meaning is "
                 "temporal, and a snapshot prompt under-determines it."
+            ),
+        ),
+        session_id: str | None = Field(
+            default=None,
+            description=(
+                "The harness session id — the durable identity of THIS locus. "
+                "Keys the renewal ledger, so what has already been delivered "
+                "into this waking stays delivered across a server restart or "
+                "a transport reconnect. Without it the ledger falls back to "
+                "the transport session, which dies with the connection: the "
+                "same bodies then arrive at full weight inside a conversation "
+                "that already holds them, which is the drone the renewal "
+                "economy exists to prevent. Supplied by the hook client."
             ),
         ),
         ctx: Context | None = None,
@@ -1012,7 +1079,16 @@ def create_mcp_server(
                 max_chars=max_chars,
                 refresh_turns=infuse_refresh_turns,
                 expansion_bias=expansion_bias,
-                locus_key=_locus_key(ctx) if ctx else None,
+                # The durable identity first. v0.12.0 made the locus survive
+                # a restart; the ledger tracking what this locus has already
+                # been told did not follow, so a mid-waking restart re-drones
+                # material the conversation still holds. Transport session
+                # remains the fallback — honest, and what a client that sends
+                # no identity gets.
+                locus_key=(
+                    session_id
+                    or (_transport_session(ctx) if ctx else None)
+                ),
                 seed_matches=seed_matches,
                 selection_meta=selection_meta,
             )
@@ -1273,10 +1349,18 @@ async def main(
     async def _sidecar_reconcile() -> None:
         try:
             index = MeaningIndex(matcher_sidecar)
+            # The process layer is not meaning-bearing and never was: a
+            # Locus is an instantiation of the self, not something the self
+            # noticed. Derived from PROCESS_TYPES rather than naming a label,
+            # because this sweep is the one site a new process type can
+            # actually reach — it matches every named node in the graph.
             res = await kenning_encounter.driver.execute_query(
-                "MATCH (n) WHERE NOT n:Encounter AND n.name IS NOT NULL "
-                "RETURN n.name AS name, labels(n)[0] AS type, "
-                "       coalesce(n.description, '') AS description",
+                lit(
+                    f"MATCH (n) WHERE {not_process_node('n')} "
+                    "AND n.name IS NOT NULL "
+                    "RETURN n.name AS name, labels(n)[0] AS type, "
+                    "       coalesce(n.description, '') AS description"
+                ),
                 routing_=RoutingControl.READ,
             )
             graph_nodes = [dict(r) for r in res.records]
@@ -1287,6 +1371,12 @@ async def main(
             if to_remove:
                 index.remove(to_remove)
             done = 0
+            # Tally failures by reason, never by node. Keyless,
+            # compress_meaning raises before any network call, so this
+            # branch fires once per node — and the old per-node warning
+            # named it, writing the whole corpus into `docker logs` on a
+            # keyless start.
+            deferred: dict[str, int] = {}
             for n in to_compress:
                 try:
                     meaning = await compress_meaning(
@@ -1298,15 +1388,59 @@ async def main(
                     }})
                     done += 1
                 except Exception as e:
-                    logger.warning(
-                        f"sidecar reconcile: {n['name']!r} deferred: {e}"
-                    )
+                    record_deferral(deferred, e)
+            if deferred:
+                logger.warning(f"sidecar reconcile: {deferral_summary(deferred)}")
             logger.info(
                 f"sidecar reconcile: {done}/{len(to_compress)} compressed, "
                 f"{len(to_remove)} removed, corpus {len(graph_nodes)}"
             )
         except Exception as e:
             logger.warning(f"sidecar reconcile failed (non-fatal): {e}")
+
+    # -- The unmigrated-spine guard (v0.12.2) --------------------------------
+    #
+    # A pre-v0.12.0 graph upgraded to this server WORKS. advance_encounter
+    # mints a locus, every write resolves, every read answers — and the entire
+    # prior history sits orphaned from the locus layer, permanently invisible,
+    # with nothing said about it. Reproduced on a clean Neo4j before this was
+    # written: 3 encounters, 1 with a locus, 2 orphaned, server silent.
+    #
+    # That is the falsifier-shaped-output class sitting in the upgrade path of
+    # the release whose entire subject is making a silent absence visible. The
+    # guard reports; it never migrates. A graph-wide write on the agent's own
+    # accumulated experience is an act somebody performs and watches, not
+    # something a container does on boot while nobody is looking.
+    #
+    # WARNING rather than INFO deliberately, and the level is load-bearing:
+    # no log handler is attached anywhere in this package, so Python's
+    # logging.lastResort handles records and it sits at WARNING. An INFO line
+    # here would be discarded and the guard would be decorative.
+    #
+    # Counts only, never names — same rule as the deferral summary.
+    async def _spine_guard() -> None:
+        try:
+            res = await kenning_encounter.driver.execute_query(
+                "MATCH (e:Encounter) WHERE NOT (:Locus)-[:OPENED]->(e) "
+                "RETURN count(e) AS orphaned",
+                routing_=RoutingControl.READ,
+            )
+            orphaned = res.records[0]["orphaned"] if res.records else 0
+            if orphaned:
+                logger.warning(
+                    f"UNMIGRATED SPINE: {orphaned} encounter(s) belong to no "
+                    "Locus. Their history is invisible to the locus layer and "
+                    "nothing will report it again. This server runs correctly "
+                    "meanwhile — new encounters get loci — which is exactly why "
+                    "it needs saying. Remedy (additive, idempotent, reversible, "
+                    "and it checks itself against a prediction computed first): "
+                    "docker exec <container> python -m kenning_encounter.migrate "
+                    "--apply"
+                )
+        except Exception as e:
+            logger.warning(f"spine guard could not run (non-fatal): {e}")
+
+    asyncio.create_task(_spine_guard())
 
     asyncio.create_task(_sidecar_reconcile())
 
@@ -1361,15 +1495,10 @@ async def main(
                     "Must be one of: stdio, sse, http, streamable-http"
                 )
     finally:
-        # Idle-MARK, never idle-seal: the server is discarding its locus state,
-        # so any encounter still open here loses its implicit addressing —
-        # stamp dissolved_at (mechanical timestamp, seal fields untouched).
-        # Best-effort: a hard kill skips this, and the unsealed set surfaced at
-        # the next orient/advance catches whatever was missed.
-        try:
-            marked = await kenning_encounter.mark_open_dissolved()
-            if marked:
-                logger.info(f"Marked dissolved at shutdown: {marked}")
-        except Exception as e:
-            logger.warning(f"Dissolution marking at shutdown failed: {e}")
+        # No dissolution marking at shutdown as of v0.12.0. There is nothing
+        # to mark: the locus is a node, its open encounter is a graph read,
+        # and a restart strands neither. An encounter left without a seal is
+        # simply one whose ending was not examined — the honest record, and
+        # now honest for the right reason, since the server can no longer be
+        # the cause of it.
         await neo4j_driver.close()

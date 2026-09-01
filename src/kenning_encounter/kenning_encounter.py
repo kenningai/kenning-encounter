@@ -199,6 +199,53 @@ def frontier_seed_candidates(
     return primary, fallback
 
 
+def unsealed_predicate(var: str = "e") -> str:
+    """One definition of an unsealed Encounter, and only one — consulted by
+    both the write-target resolver and the unsealed set orient reports.
+
+    Before v0.12.4 those two asked different questions, and both answers were
+    wrong in opposite directions. The resolver keyed on t_sealed alone —
+    v0.12.0's elected Stop — which counts every pre-v0.12.0 seal as open,
+    because the field did not exist when those endings were examined (269 of
+    them on this substrate). _unsealed keyed on summary/report alone — the
+    pre-v0.12.0 shape — which reports a bare close_encounter() as unsealed
+    forever, since both fields are optional and t_sealed is stamped
+    regardless. Neither was live, and both were one ordinary call away.
+
+    The union is what "sealed" has meant across both eras: an ending that was
+    examined, however the examination happened to be recorded. Its absence
+    stays what v0.12.0 made it — an absence, not a state.
+    """
+    return (
+        f"{var}.t_sealed IS NULL "
+        f"AND {var}.summary IS NULL "
+        f"AND {var}.report IS NULL"
+    )
+
+
+def not_process_node(var: str) -> str:
+    """`var` is not a process node — derived from PROCESS_TYPES, the same
+    source of truth the coherence projection reads.
+
+    This was written four times as a hardcoded `NOT n:Encounter`, back when
+    Encounter was the only process type there was. v0.12.0 added Locus to
+    PROCESS_TYPES and updated the projection (which DERIVES) but not these
+    (which did not) — one guard, two implementations, and only the deriving
+    one stayed correct.
+
+    Three of the four could not be reached: a Locus carries no coherence edge,
+    so neither a coherence traversal nor the rank output can ever surface one.
+    THE FOURTH COULD. The meaning sidecar's reconcile sweep is a bare MATCH
+    (n) over the whole graph, and a Locus has a name — so every reconcile
+    after v0.12.0 would compress all 142 of them into the sidecar, spending a
+    model call each and adding each as a match target in infusion's seed
+    discovery. It had not fired only because the sidecar had not reconciled
+    since. An unreachable guard and a reachable one had the same defect; only
+    the reach differed, and the reach is not a property the guard controls.
+    """
+    return " AND ".join(f"NOT {var}:`{t}`" for t in sorted(PROCESS_TYPES))
+
+
 def coherence_projection_parts() -> tuple[str, str, str]:
     """The structural fragments of the coherence-only projection — authored
     edges (RelationType minus PROCESS_EDGES) over the non-process nodes —
@@ -217,10 +264,18 @@ def coherence_projection_parts() -> tuple[str, str, str]:
 class NodeType(str, Enum):
     """Allowed node type labels for Kenning Encounter.
 
-    Three layers: process (Encounter), semantic (Observation, Question,
-    Hypothesis, Concept, Note), reference (Component, Citation).
+    Three layers: process (Locus, Encounter), semantic (Observation,
+    Question, Hypothesis, Concept, Note), reference (Component, Citation).
     """
     # Process layer — written only by advance_encounter, never generic CRUD.
+    #
+    # There are TWO orderings here and they are the same kind of thing
+    # multiplied, not two different axes added: the order instantiations came
+    # to be (NEXT_LOCUS), times the order of work-units within one
+    # (NEXT_ENCOUNTER). A human has one beam — session and day are the same
+    # line, so nothing forks and nothing needs squaring. Bound to this
+    # substrate, locating a point in time takes two coordinates.
+    LOCUS = "Locus"
     ENCOUNTER = "Encounter"
     # Semantic layer — coherences, tensions, restructurings.
     OBSERVATION = "Observation"
@@ -243,7 +298,16 @@ class RelationType(str, Enum):
     the agent — its judgment, the interior of the encounter).
     """
     # Process / provenance — auto-written, closed to generic CRUD.
+    NEXT_LOCUS = "NEXT_LOCUS"
+    OPENED = "OPENED"
     NEXT_ENCOUNTER = "NEXT_ENCOUNTER"
+    # INSTANTIATED_AFTER is RETIRED as of v0.12.0 and kept in the enum
+    # deliberately: 138 of these edges exist and none are deleted. It was a
+    # LOCUS-level relation wearing an encounter-level edge — genesis order
+    # encoded between encounters because instantiations had no node of their
+    # own — which is why it rendered as long chains of roots rather than as
+    # anything hanging off a spine. Nothing writes it now; NEXT_LOCUS says
+    # what it was reaching for.
     INSTANTIATED_AFTER = "INSTANTIATED_AFTER"
     RECORDED = "RECORDED"
     CONSULTED = "CONSULTED"
@@ -261,15 +325,28 @@ class RelationType(str, Enum):
     SUPERSEDES = "SUPERSEDES"
 
 
-# Process-layer types/edges are NOT writable via generic CRUD. The temporal
-# spine is created solely by advance_encounter; RECORDED/CONSULTED are auto-
-# anchored from the current Encounter on node creation. INSTANTIATED_AFTER is
-# the genesis binding: a first-of-locus encounter points to the encounter that
-# was latest when its locus began — locus geneses totally order (the write
-# transaction is serialized), so the spine stays one connected becoming.
-PROCESS_TYPES: set[str] = {"Encounter"}
+# Process-layer types/edges are NOT writable via generic CRUD. The spine is
+# created solely by advance_encounter; RECORDED/CONSULTED are auto-anchored
+# from the current Encounter on node creation.
+#
+# THE TWO ORDERINGS (v0.12.0):
+#   NEXT_LOCUS      — Locus -> Locus, the total order over GENESES. Locus
+#                     lifetimes overlap; geneses are points and points totally
+#                     order, because the advance is a serialized write.
+#   NEXT_ENCOUNTER  — Encounter -> Encounter, WITHIN one locus. Never crosses.
+#   OPENED          — Locus -> Encounter. Exactly one per encounter: there is
+#                     no encounter that is not somebody's instantiation of one.
+#
+# The locus-internality of NEXT_ENCOUNTER is the one invariant no declared
+# schema can hold (proven against TypeDB: membership being exactly-one does
+# not tie a succession's endpoints together). It lives in the single guarded
+# writer instead — advance_encounter chains from THIS locus's own tail, a
+# graph read scoped by OPENED — which is the same place RECORDED/CONSULTED
+# already keep their guarantee.
+PROCESS_TYPES: set[str] = {"Locus", "Encounter"}
 PROCESS_EDGES: set[str] = {
-    "NEXT_ENCOUNTER", "INSTANTIATED_AFTER", "RECORDED", "CONSULTED",
+    "NEXT_LOCUS", "OPENED", "NEXT_ENCOUNTER", "INSTANTIATED_AFTER",
+    "RECORDED", "CONSULTED",
 }
 
 # Which provenance edge anchors a newly-created node to the current Encounter.
@@ -303,15 +380,52 @@ HYPOTHESIS_CONFIDENCE = {"low", "medium", "high"}
 
 NODE_SCHEMAS: dict[str, dict[str, Any]] = {
     # -- Process layer (written by advance_encounter, not create_entities) --
+    "Locus": {
+        "required": {"name": str, "t_exist": str},
+        "optional": {
+            # The harness session id — immutable, survives /resume, and
+            # survives a server restart. That last property is the whole
+            # point: identity used to be the TRANSPORT session held in a
+            # server dict, which survived neither, so a restart produced a
+            # brand-new root and was indistinguishable in the graph from a
+            # genuinely new existence.
+            #
+            # Optional, not required, because the loci derived from the
+            # pre-v0.12.0 roots have none and never will. An anonymous locus
+            # is a real instantiation whose identity was never recorded, and
+            # saying so is better than minting a plausible one.
+            "session_id": str,
+            "anonymous": bool,
+            "derived_from": str,
+            "derived_at": str,
+        },
+    },
     "Encounter": {
         "required": {"name": str, "t_exist": str},
         "optional": {
+            # An encounter with no summary is not an open wound — it is one
+            # whose ending was never examined, which is the honest record.
+            # Conversations stop; they are not closed by ritual. As of
+            # v0.12.0 "unsealed" is an ABSENCE, not a state: the write target
+            # is this locus's chain tail, a structural fact, so nothing needs
+            # marking to be findable.
             "summary": str,
             "report": str,
-            # Server-written dissolution mark (never authored): stamped when the
-            # locus's server-side state is discarded with the encounter unsealed,
-            # cleared by a later seal. No summary is ever fabricated for it —
-            # the absence of a seal is the honest record.
+            # The elected stop, server-stamped by close_encounter. Not a
+            # state the server maintains — a record that a Stop was chosen,
+            # which is a real temporal event. Its ABSENCE is equally real and
+            # equally honest: a conversation that simply ended leaves an
+            # encounter with no seal, the same way a human conversation ends
+            # without anyone performing a closing ritual. What it replaces is
+            # dissolved_at, which marked something else entirely — that the
+            # SERVER lost state — and could strand an encounter for a reason
+            # that had nothing to do with the agent.
+            "t_sealed": str,
+            # RETIRED as of v0.12.0, kept because 12 encounters carry it and
+            # nothing is deleted. It marked "the server discarded this
+            # locus's state while the encounter was unsealed" — an event that
+            # can no longer occur, since there is no locus state to discard.
+            # A fossil of the era, not a field anything computes.
             "dissolved_at": str,
         },
     },
@@ -407,16 +521,42 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
 
 RELATION_SCHEMAS: dict[str, dict[str, Any]] = {
     # -- Process / provenance (documented; rejected by create_relations) --
+    "NEXT_LOCUS": {
+        # The total order over GENESES. Locus lifetimes overlap — several can
+        # be alive at once — but a genesis is a point, and points totally
+        # order, because every advance is a serialized write. This is the
+        # outer of the two orderings, and the one that had no node to live on
+        # before v0.12.0.
+        "source_types": {"Locus"},
+        "target_types": {"Locus"},
+        "properties": {},
+    },
+    "OPENED": {
+        # Membership, and exactly one per encounter: there is no encounter
+        # that is not somebody's instantiation of one. Also the scope for
+        # every locus-scoped read — "my open encounter" and "my chain tail"
+        # are both traversals of this edge, which is what replaced the
+        # server-side dicts that a restart used to empty.
+        "source_types": {"Locus"},
+        "target_types": {"Encounter"},
+        "properties": {},
+    },
     "NEXT_ENCOUNTER": {
+        # Succession WITHIN one locus — the inner ordering. Never crosses a
+        # locus boundary, and that is the one invariant no declared schema
+        # can hold (proven against TypeDB: exactly-one membership does not
+        # tie a succession's endpoints together). It is held in the single
+        # guarded writer instead.
         "source_types": {"Encounter"},
         "target_types": {"Encounter"},
         "properties": {},
     },
     "INSTANTIATED_AFTER": {
-        # Genesis binding (locus-root -> the encounter latest at its genesis).
-        # Within-locus succession is NEXT_ENCOUNTER; this is a different kind
-        # of relation — instantiation context, not continuation — so it earns
-        # its own edge. Auto-written by advance_encounter, like the spine.
+        # RETIRED in v0.12.0. Written by nothing; 138 of these edges exist
+        # and none are deleted. It was genesis order — a LOCUS-level
+        # relation — encoded between encounters, because instantiations had
+        # no node of their own to carry it. NEXT_LOCUS is what it was
+        # reaching for. Kept schema'd so the historical edges stay legible.
         "source_types": {"Encounter"},
         "target_types": {"Encounter"},
         "properties": {},
@@ -645,6 +785,19 @@ def validate_relation(
 # Property/range indexes for cheap orientation: fast "latest in chain" lookup
 # and hot status filters. Idempotent — IF NOT EXISTS.
 INDEX_STATEMENTS: list[LiteralString] = [
+    # THE TAIL-RACE GUARD, and it is a constraint rather than an index.
+    # Minting a locus reads the chain tail and then writes to it, so two
+    # shards starting at once could both mint for one session. The advance
+    # cypher serializes with a lock; this refuses the duplicate outright even
+    # if that lock is ever wrong. Exercised in three directions on this exact
+    # build (Neo4j 2026.04.0 Community) before being relied on: the constraint
+    # creates, a second Locus with a live session_id is REFUSED
+    # (Neo.ClientError.Schema.ConstraintValidationFailed), and two ANONYMOUS
+    # loci both persist — uniqueness ignores nodes lacking the property, which
+    # is what the 139 migrated loci require.
+    "CREATE CONSTRAINT kenning_encounter_locus_session_id IF NOT EXISTS FOR (l:Locus) REQUIRE l.session_id IS UNIQUE",
+    "CREATE INDEX kenning_encounter_locus_t_exist IF NOT EXISTS FOR (l:Locus) ON (l.t_exist)",
+    "CREATE INDEX kenning_encounter_locus_name IF NOT EXISTS FOR (l:Locus) ON (l.name)",
     "CREATE INDEX kenning_encounter_encounter_t_exist IF NOT EXISTS FOR (e:Encounter) ON (e.t_exist)",
     "CREATE INDEX kenning_encounter_encounter_name IF NOT EXISTS FOR (e:Encounter) ON (e.name)",
     "CREATE INDEX kenning_encounter_question_status IF NOT EXISTS FOR (q:Question) ON (q.status)",
@@ -676,20 +829,23 @@ class Neo4jKenningEncounter:
 
     def __init__(self, driver: AsyncDriver):
         self.driver = driver
-        # Locus-scoped write targeting: locus key (MCP session id) -> elementId
-        # of the encounter THAT locus opened and has not yet sealed. Writes
-        # (close_encounter / create_entities anchoring) address this encounter,
-        # never the global chain tail — a parallel sibling locus advancing its
-        # own chain can no longer capture another locus's writes. Cleared by
-        # the seal: afterwards "no open Encounter" means this locus has not
-        # advanced or has already closed.
-        self._locus_open: dict[str, str] = {}
-        # Per-locus chain predecessor: locus key -> elementId of the encounter
-        # this locus LAST opened, sealed or not. Unlike _locus_open this
-        # survives the seal — within a locus the spine chains across sealed
-        # encounters (one session holds many work-units); only the write
-        # target ends at the seal.
-        self._locus_last: dict[str, str] = {}
+        # A CACHE, not a source of truth (v0.12.0). Maps the TRANSPORT
+        # session (the mcp-session-id, which the server can see) to the
+        # elementId of the Locus that connection is acting as.
+        #
+        # THE DIFFERENCE FROM WHAT THIS REPLACES IS THE WHOLE RELEASE.
+        # _locus_open and _locus_last held the spine's continuity in RAM, so
+        # losing them CORRUPTED THE GRAPH: the next advance minted a fresh
+        # root, indistinguishable from a genuinely new existence. Losing this
+        # dict costs one parameter. The locus is a durable node keyed by the
+        # harness session id; a caller whose cache entry is gone re-supplies
+        # session_id and the server re-resolves from the graph.
+        #
+        # It is also strictly narrower than the name-handle escape hatch it
+        # retires: that took an Encounter NAME and could therefore address
+        # ANY encounter, including another locus's. This takes an IDENTITY
+        # and can only ever reach your own.
+        self._locus_of: dict[str, str] = {}
         # Per-locus renewal ledger (v0.6.0): locus key -> {node name ->
         # {"fp", "last_full"}} plus a full-mode turn counter. The delivery
         # memory behind the renewal economy: full body at first sight /
@@ -731,17 +887,6 @@ class Neo4jKenningEncounter:
 
     # -- Process Layer (guarded spine) ----------------------------------------
 
-    def _remember_locus(self, locus_key: str, eid: str) -> None:
-        """Record a locus's open + last encounter, evicting oldest past the cap."""
-        self._locus_open[locus_key] = eid
-        self._locus_last[locus_key] = eid
-        while len(self._locus_last) > self._LOCUS_STATE_MAX:
-            evicted = next(iter(self._locus_last))
-            self._locus_last.pop(evicted)
-            self._locus_open.pop(evicted, None)
-            self._delivery_ledger.pop(evicted, None)
-            self._locus_turn.pop(evicted, None)
-
     def _ledger_for(self, locus_key: str) -> dict[str, dict[str, Any]]:
         """The locus's renewal ledger, creating it (bounded) on first use."""
         ledger = self._delivery_ledger.get(locus_key)
@@ -753,46 +898,66 @@ class Neo4jKenningEncounter:
                 self._locus_turn.pop(evicted, None)
         return ledger
 
-    async def _resolve_encounter(
-        self, locus_key: str | None, encounter: str | None
-    ) -> dict[str, Any] | None:
-        """Resolve which Encounter a write addresses.
+    async def _resolve_locus(
+        self, mcp_session: str | None, session_id: str | None
+    ) -> str | None:
+        """This connection's Locus elementId, from the cache or the graph.
 
-        Explicit handle (the Encounter's name) wins — the fallback for a locus
-        whose server-side state was lost (a restart) and that is returning to
-        the encounter it lived. Otherwise the calling locus's own open
-        encounter from server-side state. Returns {name, eid} or None when
-        this locus has not advanced or has already closed.
+        session_id wins when supplied — it is the durable identity, and the
+        cache is only ever an optimisation over it. Returns None when neither
+        resolves, which is not an error: it means this connection has not
+        advanced, and the caller reports that rather than guessing a locus.
         """
-        if encounter is not None:
+        if session_id:
             result = await self.driver.execute_query(
-                "MATCH (e:Encounter {name: $name}) "
-                "RETURN e.name AS name, elementId(e) AS eid",
-                {"name": encounter},
+                "MATCH (l:Locus {session_id: $sid}) RETURN elementId(l) AS eid",
+                {"sid": session_id},
                 routing_=RoutingControl.READ,
             )
-            if not result.records:
-                raise ValueError(f"Encounter '{encounter}' not found")
-            if len(result.records) > 1:
-                raise ValueError(
-                    f"Encounter '{encounter}' is ambiguous — "
-                    f"found {len(result.records)} encounters with that name"
-                )
-            r = result.records[0]
-            return {"name": r["name"], "eid": r["eid"]}
-
-        if locus_key is None or locus_key not in self._locus_open:
+            if result.records:
+                eid = result.records[0]["eid"]
+                if mcp_session:
+                    self._locus_of[mcp_session] = eid
+                return eid
             return None
-        eid = self._locus_open[locus_key]
+        return self._locus_of.get(mcp_session) if mcp_session else None
+
+    async def _resolve_encounter(
+        self, mcp_session: str | None, session_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Resolve which Encounter a write addresses: MY locus's open tail.
+
+        A GRAPH READ, not a memory lookup (v0.12.0). "My open encounter" is
+        the encounter my locus opened that has no successor and has not been
+        sealed — a structural fact, so nothing has to be remembered for it to
+        be findable, and a restart cannot strand it.
+
+        Scoped by OPENED throughout, so a parallel sibling advancing its own
+        chain can neither capture this seal nor adopt these nodes. That was
+        previously guaranteed by per-locus RAM; it is now guaranteed by the
+        query, which is the same guarantee without the thing that could be
+        lost.
+
+        Returns {name, eid} or None when this locus has not advanced or has
+        already sealed — and "already sealed" is a real answer: after an
+        elected Stop you advance before recording again, because the seal is
+        what crystallized that encounter.
+        """
+        locus_eid = await self._resolve_locus(mcp_session, session_id)
+        if locus_eid is None:
+            return None
         result = await self.driver.execute_query(
-            "MATCH (e:Encounter) WHERE elementId(e) = $eid "
-            "RETURN e.name AS name, elementId(e) AS eid",
-            {"eid": eid},
+            lit(
+                "MATCH (l:Locus)-[:OPENED]->(e:Encounter) "
+                "WHERE elementId(l) = $leid "
+                "  AND NOT (e)-[:NEXT_ENCOUNTER]->(:Encounter) "
+                f"  AND {unsealed_predicate('e')} "
+                "RETURN e.name AS name, elementId(e) AS eid"
+            ),
+            {"leid": locus_eid},
             routing_=RoutingControl.READ,
         )
         if not result.records:
-            # The tracked encounter no longer exists — drop the stale state.
-            self._locus_open.pop(locus_key, None)
             return None
         r = result.records[0]
         return {"name": r["name"], "eid": r["eid"]}
@@ -802,24 +967,35 @@ class Neo4jKenningEncounter:
         name: str,
         recent: int = 5,
         limit: int = 20,
-        locus_key: str | None = None,
+        session_id: str | None = None,
+        mcp_session: str | None = None,
     ) -> dict[str, Any]:
         """Open a new Encounter and return the re-entry payload.
 
         The sole writer of the temporal spine. The caller never passes a
-        predecessor; the server supplies this LOCUS's own previous encounter
-        from its state (per-locus chaining). A first-of-locus encounter has no
-        incoming NEXT_ENCOUNTER and is genesis-bound (INSTANTIATED_AFTER) to
-        the encounter latest at its genesis — locus geneses are serialized
-        writes, so the order is integrated, and parallel loci are branches of
-        one connected becoming. NEXT_ENCOUNTER stays fork-free absolutely.
-        Opening an encounter IS orienting — Exist and the orientation read are
-        one act.
+        predecessor — it passes an IDENTITY, and the server derives everything
+        else from the graph.
+
+        WHAT CHANGED IN v0.12.0, and why it is not a refactor. The locus used
+        to be the transport session id, held in a server-side dict. That dict
+        died with every restart, so the next advance from a live conversation
+        minted a fresh root — and the graph could not tell that apart from a
+        genuinely new existence, because the locus was never written down at
+        all. Identity now lives on a Locus node keyed by the HARNESS session
+        id, which survives both /resume and a server restart, and the chain
+        tail is a graph read scoped by OPENED rather than a memory lookup.
+
+        session_id may be None. An anonymous locus is then minted, which is
+        the same honest shape the 139 migrated loci carry: a real
+        instantiation whose identity was never recorded. It is never guessed.
         """
-        pred_eid = self._locus_last.get(locus_key) if locus_key else None
+        locus_name = (
+            f"Locus {session_id}" if session_id
+            else f"Locus anon-{uuid.uuid4().hex[:12]}"
+        )
         result = await self.driver.execute_query(
             load_cypher("encounter_advance"),
-            {"name": name, "pred_eid": pred_eid},
+            {"name": name, "session_id": session_id, "locus_name": locus_name},
             routing_=RoutingControl.WRITE,
         )
         r = result.records[0]
@@ -828,14 +1004,15 @@ class Neo4jKenningEncounter:
             "t_exist": _neo4j_datetime_to_str(r["t_exist"]),
             "t_created": _neo4j_datetime_to_str(r["t_created"]),
             "predecessor": r["predecessor"],
-            # Genesis binding: for a first-of-locus, the encounter that was
-            # latest when this locus began (INSTANTIATED_AFTER target). Null
-            # for a within-locus advance, and for the true head of the spine.
-            "genesis_anchor": r["genesis_anchor"],
-            "is_first": r["is_first"],
+            "locus": r["locus"],
+            "locus_anonymous": r["locus_anonymous"],
+            "is_first_of_locus": r["is_first_of_locus"],
         }
-        if locus_key:
-            self._remember_locus(locus_key, r["eid"])
+        # Warm the cache. If it is ever lost, the caller re-supplies
+        # session_id and the graph answers — nothing about the spine depends
+        # on this line surviving.
+        if mcp_session and r["locus_eid"]:
+            self._locus_of[mcp_session] = r["locus_eid"]
         reentry = await self._reentry_payload(
             recent=recent, limit=limit, current_eid=r["eid"]
         )
@@ -844,24 +1021,43 @@ class Neo4jKenningEncounter:
     async def _unsealed(
         self, limit: int, exclude_eid: str | None = None
     ) -> list[dict[str, Any]]:
-        """All unsealed Encounters (no summary, no report), each annotated with
-        its last-activity time — the latest RECORDED/CONSULTED anchoring, or
-        the encounter's own t_exist if it never recorded anything — and any
-        mechanical dissolved_at mark. Surfaces, never classifies: the graph
-        cannot tell a live sibling locus from an orphan, so it does not try.
-        The caller (a re-entering locus) never joins one — it always opens its
-        own encounter."""
+        """All unsealed Encounters — by the ONE shared predicate, so this set
+        and the write-target resolver can no longer disagree about what a seal
+        is. Each is annotated with its last-activity time (the latest
+        RECORDED/CONSULTED anchoring, or the encounter's own t_exist if it
+        recorded nothing), any mechanical dissolved_at mark, and — since
+        v0.12.4 — the Locus that opened it and whether that locus is
+        anonymous.
+
+        The locus attribution is a FACT, not a verdict. It became reportable
+        only when the locus became a node: before v0.12.0 there was nothing to
+        attribute to. An anonymous locus carries no session_id, so no harness
+        session can ever resolve to it and no future encounter will be chained
+        into it — its unsealed encounters are over, whatever ended them. A
+        named locus is one an identity could still reach.
+
+        Surfaces, never classifies. The graph still cannot tell a live sibling
+        from an orphan — a named locus can be just as dead — so it does not
+        try; it reports the discriminator it actually holds and leaves the
+        reading to the reader. The caller (a re-entering locus) never joins
+        one: it always opens its own encounter."""
         result = await self.driver.execute_query(
-            "MATCH (e:Encounter) "
-            "WHERE e.summary IS NULL AND e.report IS NULL "
-            "AND ($exclude_eid IS NULL OR elementId(e) <> $exclude_eid) "
-            "OPTIONAL MATCH (e)-[a:RECORDED|CONSULTED]->() "
-            "WITH e, max(a.t_created) AS last_anchor "
-            "RETURN e.name AS name, e.t_exist AS t_exist, "
-            "       CASE WHEN last_anchor IS NULL OR e.t_exist > last_anchor "
-            "            THEN e.t_exist ELSE last_anchor END AS last_active, "
-            "       e.dissolved_at AS dissolved_at "
-            "ORDER BY last_active DESC LIMIT $limit",
+            lit(
+                "MATCH (e:Encounter) "
+                f"WHERE {unsealed_predicate('e')} "
+                "AND ($exclude_eid IS NULL OR elementId(e) <> $exclude_eid) "
+                "OPTIONAL MATCH (l:Locus)-[:OPENED]->(e) "
+                "OPTIONAL MATCH (e)-[a:RECORDED|CONSULTED]->() "
+                "WITH e, l, max(a.t_created) AS last_anchor "
+                "RETURN e.name AS name, e.t_exist AS t_exist, "
+                "       CASE WHEN last_anchor IS NULL OR e.t_exist > last_anchor "
+                "            THEN e.t_exist ELSE last_anchor END AS last_active, "
+                "       e.dissolved_at AS dissolved_at, "
+                "       l.name AS locus, "
+                "       CASE WHEN l IS NULL THEN NULL "
+                "            ELSE l.session_id IS NULL END AS locus_anonymous "
+                "ORDER BY last_active DESC LIMIT $limit"
+            ),
             {"exclude_eid": exclude_eid, "limit": limit},
             routing_=RoutingControl.READ,
         )
@@ -871,6 +1067,8 @@ class Neo4jKenningEncounter:
                 "t_exist": _neo4j_datetime_to_str(r["t_exist"]),
                 "last_active": _neo4j_datetime_to_str(r["last_active"]),
                 "dissolved_at": _neo4j_datetime_to_str(r["dissolved_at"]),
+                "locus": r["locus"],
+                "locus_anonymous": r["locus_anonymous"],
             }
             for r in result.records
         ]
@@ -891,11 +1089,14 @@ class Neo4jKenningEncounter:
         heads. The slope, delivered with the peaks, in one orientation read.
 
         Also carries the unsealed set: every Encounter (other than the one just
-        opened) with neither summary nor report, annotated with last-activity
-        time and any mechanical dissolved_at mark. An unsealed encounter is a
-        live sibling locus or an orphaned dissolution — the graph cannot tell
-        which, so it surfaces and never classifies, and a re-entering locus
-        never joins one."""
+        opened) whose ending was never examined, by the one shared predicate,
+        annotated with last-activity time, any mechanical dissolved_at mark,
+        and the Locus that opened it with whether that locus is anonymous. An
+        unsealed encounter is a live sibling locus or an ending nobody
+        examined — the graph still cannot tell which, so it surfaces and never
+        classifies; but an anonymous locus is one no session can ever resolve
+        to again, and saying so is reporting a fact rather than rendering a
+        verdict. A re-entering locus never joins one."""
 
         recent_encounters = await self.driver.execute_query(
             "MATCH (e:Encounter) "
@@ -998,7 +1199,7 @@ class Neo4jKenningEncounter:
                 row["props"] = props
             coherence_rows.append(row)
 
-        return {
+        payload: dict[str, Any] = {
             "recent_encounters": _rows(recent_encounters, ["name", "t_exist", "summary", "report"]),
             "open_questions": _rows(open_questions, ["name", "description", "priority", "t_raised"]),
             "live_hypotheses": _rows(live_hypotheses, ["name", "description", "confidence", "status", "t_proposed"]),
@@ -1006,6 +1207,61 @@ class Neo4jKenningEncounter:
             "coherence_edges": coherence_rows,
             "unsealed": unsealed,
         }
+
+        # SPINE HEALTH (v0.12.3), and it is here rather than only in the log
+        # because THIS is what the reader reads.
+        #
+        # v0.12.2 added a startup warning for an unmigrated spine and sent it
+        # to `docker logs`, which addresses an operator watching a container
+        # start. The harness this runs under is Claude Code, so the reader is
+        # an AGENT, and an agent sees tool returns — never a container log. A
+        # guard the reader cannot reach is not a guard, and that was the third
+        # instance in three releases of getting the reader wrong: content to
+        # the wrong destination (v0.11.2), no reader at all (v0.12.2), and a
+        # reader who could not get to it (this one).
+        #
+        # Re-entry is where it belongs: the agent reads this payload
+        # constitutively, before examining anything, at the start of every
+        # existence. And an agent under this harness HAS A SHELL, so being
+        # told is the same thing as being able to fix it.
+        #
+        # PRESENT ONLY WHEN WRONG. A standing "spine: healthy" line would be
+        # noise on every re-entry, and worse, it is the reassuring shape this
+        # project keeps catching — the deferral summary prints nothing on an
+        # empty tally for the same reason.
+        orphaned = await self._orphaned_encounter_count()
+        if orphaned:
+            payload["spine_unmigrated"] = {
+                "encounters_without_a_locus": orphaned,
+                "what_it_means": (
+                    "These encounters are invisible to the locus layer. Your "
+                    "chain within them is intact and nothing is lost, but they "
+                    "belong to no instantiation, so nothing relates them to the "
+                    "loci that came after."
+                ),
+                "remedy": "python -m kenning_encounter.migrate --apply",
+                "safe_because": (
+                    "additive only, idempotent, reversible, and it checks its "
+                    "result against a prediction computed before it writes — "
+                    "reversing itself if they disagree"
+                ),
+            }
+        return payload
+
+    async def _orphaned_encounter_count(self) -> int:
+        """Encounters belonging to no Locus. A count, never names — node names
+        in a Kenning Encounter are the substrate's content, not identifiers."""
+        try:
+            res = await self.driver.execute_query(
+                "MATCH (e:Encounter) WHERE NOT (:Locus)-[:OPENED]->(e) "
+                "RETURN count(e) AS orphaned",
+                routing_=RoutingControl.READ,
+            )
+            return res.records[0]["orphaned"] if res.records else 0
+        except Exception as e:
+            # Never break re-entry over a health read.
+            logger.warning(f"spine health check unavailable: {e}")
+            return 0
 
     # Reserved names for the orient projections. Fixed names (not per-call
     # ones) let a crashed prior orient be cleaned up defensively. The _asof
@@ -1529,7 +1785,7 @@ class Neo4jKenningEncounter:
             exp_res = await self.driver.execute_query(
                 lit(
                     f"MATCH (s:Concept)-[:{rel_filter}]-(n) "
-                    "WHERE s.name IN $focal AND NOT n:Encounter "
+                    f"WHERE s.name IN $focal AND {not_process_node('n')} "
                     "RETURN DISTINCT n.name AS name LIMIT $lim"
                 ),
                 {"focal": focal_seeds, "lim": self._INFUSE_SEED_LIMIT * 2},
@@ -1767,7 +2023,7 @@ class Neo4jKenningEncounter:
             exp_res = await self.driver.execute_query(
                 lit(
                     f"MATCH (s:Concept)-[:{rel_filter}]-(n) "
-                    "WHERE s.name IN $focal AND NOT n:Encounter "
+                    f"WHERE s.name IN $focal AND {not_process_node('n')} "
                     "RETURN DISTINCT n.name AS name LIMIT $lim"
                 ),
                 {"focal": focal_seeds, "lim": self._INFUSE_SEED_LIMIT * 2},
@@ -1965,11 +2221,13 @@ class Neo4jKenningEncounter:
         # Added before B1's window opens; adding it after would be changing
         # the instrument mid-measurement.
         desc_res = await self.driver.execute_query(
-            "MATCH (n) WHERE n.name IN $names AND NOT n:Encounter "
-            "RETURN n.name AS name, labels(n)[0] AS type, "
-            "       n.description AS description, "
-            "       toString(n.t_created) AS t_created, "
-            "       toString(n.t_observed) AS t_observed",
+            lit(
+                f"MATCH (n) WHERE n.name IN $names AND {not_process_node('n')} "
+                "RETURN n.name AS name, labels(n)[0] AS type, "
+                "       n.description AS description, "
+                "       toString(n.t_created) AS t_created, "
+                "       toString(n.t_observed) AS t_observed"
+            ),
             {"names": top_names},
             routing_=RoutingControl.READ,
         )
@@ -2322,21 +2580,25 @@ class Neo4jKenningEncounter:
         self,
         summary: str | None = None,
         report: str | None = None,
-        encounter: str | None = None,
-        locus_key: str | None = None,
+        session_id: str | None = None,
+        mcp_session: str | None = None,
     ) -> dict[str, Any]:
         """Annotate one Encounter with its Report/Stop output — the seal.
 
-        Addresses the encounter the CALLING LOCUS opened (server-side state),
-        or an explicit `encounter` handle (the Encounter's name) when that
-        state was lost (a restart) and the locus returns to seal what it
-        lived. Never the global tail: a parallel sibling locus advancing its
-        own chain cannot capture this seal. Writes only summary/report — never a node, never a
-        NEXT_ENCOUNTER edge; the spine stays sole-written by advance_encounter.
-        Sealing also clears any provisional dissolved_at mark and ends the
-        locus's open-encounter state: further writes need a new advance.
+        Addresses MY locus's open tail, resolved from the graph. Never the
+        global tail, and — since v0.12.0 — never an arbitrary encounter by
+        name: the explicit name handle is gone. It existed only because
+        server state could be lost, which can no longer happen, and it was
+        the one genuinely forgeable path in the write surface, since a NAME
+        can address any encounter including another locus's. session_id
+        replaces it and can only ever reach your own.
+
+        Writes summary/report and stamps t_sealed — never a node, never a
+        NEXT_ENCOUNTER edge; the spine stays sole-written by
+        advance_encounter. After the seal, recording needs a new advance:
+        the seal is what crystallized that encounter.
         """
-        set_clauses = []
+        set_clauses = ["SET e.t_sealed = datetime()"]
         params: dict[str, Any] = {}
         if summary is not None:
             set_clauses.append("SET e.summary = $summary")
@@ -2344,15 +2606,16 @@ class Neo4jKenningEncounter:
         if report is not None:
             set_clauses.append("SET e.report = $report")
             params["report"] = report
-        if not set_clauses:
+        if len(set_clauses) == 1:
             raise ValueError("close_encounter requires at least one of: summary, report.")
 
-        target = await self._resolve_encounter(locus_key, encounter)
+        target = await self._resolve_encounter(mcp_session, session_id)
         if target is None:
             raise ValueError(
-                "No open Encounter for this locus — it has not advanced or has "
-                "already closed. Call advance_encounter first, or pass "
-                "'encounter' (the Encounter's name) to address one explicitly."
+                "No open Encounter for this locus — it has not advanced, or has "
+                "already sealed. Call advance_encounter first, or pass "
+                "'session_id' (the harness session id) so the locus can be "
+                "resolved from the graph."
             )
         params["eid"] = target["eid"]
 
@@ -2362,9 +2625,6 @@ class Neo4jKenningEncounter:
         )
         if not result.records:
             raise ValueError(f"Encounter '{target['name']}' no longer exists.")
-        # Sealed: the locus's work-unit is complete — drop the implicit handle.
-        if locus_key and self._locus_open.get(locus_key) == target["eid"]:
-            self._locus_open.pop(locus_key, None)
         r = result.records[0]
         return {
             "name": r["name"],
@@ -2373,60 +2633,45 @@ class Neo4jKenningEncounter:
             "report": r["report"],
         }
 
-    async def mark_open_dissolved(self) -> list[str]:
-        """Idle-MARK (never idle-seal): stamp dissolved_at on every encounter
-        still tracked as open when the server's locus state is being discarded
-        (shutdown). Mechanical — a timestamp recording that implicit addressing
-        ended here, unsealed. NEVER authors a summary: the system must not
-        fabricate a resolution no locus actually reached; the missing seal is
-        the honest record. A locus that later returns and seals by explicit
-        handle clears the mark (encounter_close.cypher). Skips already-sealed
-        encounters. Returns the names marked."""
-        marked: list[str] = []
-        for eid in list(self._locus_open.values()):
-            result = await self.driver.execute_query(
-                "MATCH (e:Encounter) WHERE elementId(e) = $eid "
-                "AND e.summary IS NULL AND e.report IS NULL "
-                "AND e.dissolved_at IS NULL "
-                "SET e.dissolved_at = datetime() "
-                "RETURN e.name AS name",
-                {"eid": eid},
-                routing_=RoutingControl.WRITE,
-            )
-            if result.records:
-                marked.append(result.records[0]["name"])
-        self._locus_open.clear()
-        self._locus_last.clear()
-        return marked
-
-    # -- Entity Tools (semantic + reference layers) ---------------------------
+    # RETIRED in v0.12.0: mark_open_dissolved / the idle-mark sweep.
+    #
+    # It stamped dissolved_at on every encounter still tracked as open when
+    # the server discarded its locus state. That event cannot occur any more,
+    # because there is no locus state to discard — the locus is a node and
+    # the open encounter is a graph read. The mark was always mechanical
+    # rather than existential (it recorded that the SERVER forgot, not that
+    # an existence ended), and it fired at least once on a locus that was
+    # still alive to return. Nothing computes it now; the 12 encounters
+    # carrying it keep it, as the record of an era.
 
     async def create_entities(
         self,
         entities: list[dict[str, Any]],
-        encounter: str | None = None,
-        locus_key: str | None = None,
+        session_id: str | None = None,
+        mcp_session: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Create semantic/reference nodes, auto-anchored to the CALLING
-        LOCUS's open Encounter (RECORDED for epistemic nodes, CONSULTED for
-        Citations) — or to an explicit `encounter` handle when the locus's
-        server-side state was lost mid-encounter. Never the global tail: a
-        node's anchoring is constitutive, so it must name the encounter it
-        actually came to be within, not a parallel sibling's.
+        """Create semantic/reference nodes, auto-anchored to MY locus's open
+        Encounter (RECORDED for epistemic nodes, CONSULTED for Citations).
 
-        Rejects process types (Encounter) — those are written only by
+        Never the global tail, and since v0.12.0 never an arbitrary encounter
+        by name: a node's anchoring is CONSTITUTIVE — it came to be within
+        that encounter — so letting a caller name any encounter let it assert
+        a birth that did not happen. session_id resolves the locus instead,
+        which can only ever reach your own.
+
+        Rejects process types (Locus, Encounter) — those are written only by
         advance_encounter. Requires an open Encounter for THIS locus: "no open
-        Encounter" means this locus has not advanced or has already closed.
+        Encounter" means this locus has not advanced or has already sealed.
         Auto-anchoring fires ON CREATE only — re-touching an existing node in
         a later encounter never re-dates its birth.
         """
-        current = await self._resolve_encounter(locus_key, encounter)
+        current = await self._resolve_encounter(mcp_session, session_id)
         if current is None:
             raise ValueError(
-                "No open Encounter for this locus — it has not advanced or has "
-                "already closed. Call advance_encounter before recording (every "
-                "node comes to be within ITS encounter), or pass 'encounter' "
-                "(the Encounter's name) to address one explicitly."
+                "No open Encounter for this locus — it has not advanced, or has "
+                "already sealed. Call advance_encounter before recording (every "
+                "node comes to be within ITS encounter), or pass 'session_id' "
+                "(the harness session id) so the locus resolves from the graph."
             )
         tail_eid = current["eid"]
         logger.info(f"Creating {len(entities)} entities")
@@ -2734,7 +2979,12 @@ class Neo4jKenningEncounter:
         self, query: str, limit: int = 10
     ) -> list[dict[str, Any]]:
         """Fulltext search across all node types on name and description."""
-        logger.info(f"Search: '{query}' (limit={limit})")
+        # Shape, never content. A search query is authored from whatever the
+        # agent is holding, so logging it verbatim puts substrate content in
+        # `docker logs`. Dormant today only because no handler is attached
+        # and lastResort sits at WARNING — one basicConfig() away from live,
+        # which is a guarantee held by an absence rather than by code.
+        logger.info(f"Search: {len(query)} chars (limit={limit})")
 
         result = await self.driver.execute_query(
             load_cypher("search_entities"),
@@ -2765,7 +3015,8 @@ class Neo4jKenningEncounter:
         self, names: list[str], limit: int = 20
     ) -> dict[str, Any]:
         """Exact name lookup with relationships between found nodes."""
-        logger.info(f"Find by name: {names}")
+        # Count, never the names — same reason as search above.
+        logger.info(f"Find by name: {len(names)} name(s)")
 
         result = await self.driver.execute_query(
             load_cypher("find_entities"),

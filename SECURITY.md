@@ -5,7 +5,7 @@
 Write to **contact@kenningai.com**. There is no bug bounty and no formal SLA;
 this is a single-author project and reports are read by a person, not a queue.
 Please include what you did, what happened, and what you expected. If a report
-is sensitive, say so and we will agree to a disclosure timeline before anything is
+is sensitive, say so and we will agree a disclosure timeline before anything is
 published.
 
 Please do not open a public issue for a vulnerability. Pull requests are not

@@ -158,8 +158,7 @@ def infusion_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
 
     Returns the reason either way so the observation stream can record WHY a
     call was skipped. A guard that suppresses silently is indistinguishable
-    from a guard that is broken — this project has shipped that mistake
-    three times, and the observe log is where it gets caught.
+    from a guard that is broken, and the observe log is what tells them apart.
     """
     env = os.environ if env is None else env
     switch = (env.get("KENNING_ENCOUNTER_INFUSE", INFUSE_SWITCH) or "auto").lower()
@@ -233,10 +232,20 @@ def _initialize(url: str) -> str | None:
 def _call_infuse(
     url: str, sid: str, text: str,
     trajectory: list[str] | None = None,
+    harness_session: str | None = None,
 ) -> dict:
+    """One infuse call. `sid` is the MCP transport session (dies with the
+    connection); `harness_session` is the durable locus identity, and the two
+    are not interchangeable — this hook has always known the second, to key
+    its own transport-session cache file, and until v0.12.4 never sent it. So
+    the server keyed the renewal ledger on the transport session, and a
+    restart mid-waking re-delivered at full weight into a conversation that
+    already held the material."""
     arguments: dict = {"text": text}
     if trajectory:
         arguments["trajectory"] = trajectory
+    if harness_session:
+        arguments["session_id"] = harness_session
     msg, _ = _post(
         url,
         {
@@ -393,7 +402,8 @@ def main() -> int:
     # counted gap instead of shearing every index-pair after it.
     psha = hashlib.sha256(text.strip().encode()).hexdigest()[:16]
 
-    cache = _session_cache_path(args.url, str(hook_input.get("session_id", "")))
+    harness_session = str(hook_input.get("session_id", "")) or None
+    cache = _session_cache_path(args.url, harness_session or "")
     sid = None
     if os.path.exists(cache):
         with open(cache) as f:
@@ -402,7 +412,7 @@ def main() -> int:
     try:
         try:
             result = (
-                _call_infuse(args.url, sid, text, trajectory)
+                _call_infuse(args.url, sid, text, trajectory, harness_session)
                 if sid else {}
             )
             if not sid:
@@ -412,7 +422,9 @@ def main() -> int:
             sid = _initialize(args.url)
             if not sid:
                 raise RuntimeError("initialize failed")
-            result = _call_infuse(args.url, sid, text, trajectory)
+            result = _call_infuse(
+                args.url, sid, text, trajectory, harness_session
+            )
     except Exception as exc:
         # Fail silent toward the harness — but the observation stream records
         # the attempt. An unlogged failure is what made the positional join

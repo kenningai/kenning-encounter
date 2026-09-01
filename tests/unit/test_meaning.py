@@ -19,12 +19,15 @@ from kenning_encounter.meaning import (
     build_prefix,
     compress_meaning,
     content_hash,
+    deferral_summary,
     format_meaning_report,
     match_meanings,
     parse_matcher_output,
+    record_deferral,
     sidecar_diff,
     user_turns_from_transcript,
 )
+from kenning_encounter.meaning import _DEFERRAL_REASON_CAP
 
 NODES = {
     "Zeta concept": {"type": "Concept", "meaning": "About z.", "hash": "b"},
@@ -188,6 +191,85 @@ class TestMeaningIndex:
         p.write_text(json.dumps({"nodes": {}}))
         with pytest.raises(MeaningUnavailable):
             MeaningIndex(p).prefix()
+
+
+class TestDeferralReporting:
+    """The keyless-start disclosure fix, two-sided: the summary must SAY
+    enough to act on and must NOT carry a node name.
+
+    Keyless, compress_meaning raises before any network call, so the
+    reconcile sweep's failure branch fires once per node; the old per-node
+    warning named it, so a keyless first start wrote the agent's whole
+    corpus of node names into `docker logs`, readable by anything on the
+    host. Node names in a Kenning Encounter are the substrate's content, not
+    identifiers."""
+
+    # Headline-shaped, because the leak is that node names ARE prose — a
+    # name-as-identifier would have been a much smaller disclosure.
+    CORPUS = [
+        "a gate's model of what ships is not the shipping mechanism",
+        "a mark held for custody, not commerce",
+        "isolation is absorbing: a node born unwired cannot be reached",
+    ]
+
+    def _keyless_run(self, corpus):
+        """The keyless path: every node fails with the same reason."""
+        counts: dict[str, int] = {}
+        for _ in corpus:
+            record_deferral(
+                counts,
+                MeaningUnavailable("compression not configured (GEMINI_API_KEY)"),
+            )
+        return counts
+
+    def test_summary_reports_total_and_reason(self):
+        """Says enough: a bare count hides WHICH failure, a bare reason hides
+        HOW MUCH of the corpus is missing. Both, or the report conceals."""
+        line = deferral_summary(self._keyless_run(self.CORPUS * 200))
+        assert "600 deferred" in line
+        assert "1 distinct reason" in line
+        assert "GEMINI_API_KEY" in line
+
+    def test_summary_never_carries_a_node_name(self):
+        """The refusing half. 600 failures, zero names."""
+        line = deferral_summary(self._keyless_run(self.CORPUS * 200))
+        for name in self.CORPUS:
+            assert name not in line
+        for fragment in ("shipping mechanism", "custody", "isolation is absorbing"):
+            assert fragment not in line
+
+    def test_node_is_not_a_parameter_so_a_name_cannot_be_passed(self):
+        """The guard is the signature, not the call site. record_deferral
+        takes the exception and the tally — there is no argument a node
+        could arrive through, so this cannot regress by someone adding an
+        f-string back."""
+        import inspect
+
+        params = list(inspect.signature(record_deferral).parameters)
+        assert params == ["counts", "exc"]
+
+    def test_distinct_reasons_are_kept_and_ordered_by_frequency(self):
+        counts: dict[str, int] = {}
+        for _ in range(3):
+            record_deferral(counts, MeaningUnavailable("timeout"))
+        for _ in range(7):
+            record_deferral(counts, ValueError("bad json"))
+        line = deferral_summary(counts)
+        assert "10 deferred (2 distinct reasons)" in line
+        assert line.index("7x ValueError") < line.index("3x MeaningUnavailable")
+
+    def test_reason_is_capped_so_an_exception_cannot_dump_content(self):
+        """The reason is the one field that could reintroduce the leak if a
+        future exception ever embedded what it was compressing."""
+        counts: dict[str, int] = {}
+        record_deferral(counts, MeaningUnavailable("x" * 5000))
+        (reason,) = counts
+        assert len(reason) == _DEFERRAL_REASON_CAP
+
+    def test_empty_tally_is_empty_string_not_a_reassuring_line(self):
+        """Nothing deferred must print nothing — a '0 deferred' line is a
+        clean verdict from a run that may not have scanned anything."""
+        assert deferral_summary({}) == ""
 
 
 class TestSidecarAutomation:

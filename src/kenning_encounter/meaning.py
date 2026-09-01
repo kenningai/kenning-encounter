@@ -137,6 +137,50 @@ def sidecar_diff(
     return to_compress, to_remove
 
 
+# -- Deferral reporting (never the node) --------------------------------------
+
+# Cap on one reason string. The exception text is our own or httpx's today
+# and carries no node content, but a reason is the one field that could
+# reintroduce the leak this exists to close if a future exception ever
+# embedded what it was compressing.
+_DEFERRAL_REASON_CAP = 200
+
+
+def record_deferral(counts: dict[str, int], exc: BaseException) -> None:
+    """Tally one compression failure by REASON — the node is not a parameter.
+
+    The signature is the guard. The sidecar sweep used to log one line per
+    failed node, naming it; keyless, compress_meaning raises before any
+    network call, so that branch fires once per node and a keyless start
+    wrote the agent's entire corpus of node names into `docker logs`,
+    readable by anything on the host. Node names in a Kenning Encounter are not
+    identifiers — they are the substrate's content. Leaking a name cannot be
+    a call-site mistake here because a name cannot be passed in.
+    """
+    reason = f"{type(exc).__name__}: {exc}"[:_DEFERRAL_REASON_CAP]
+    counts[reason] = counts.get(reason, 0) + 1
+
+
+def deferral_summary(counts: dict[str, int]) -> str:
+    """One line: the total, how many distinct reasons, and each with its count.
+
+    Reports the count AND the reasons rather than either alone — a bare total
+    hides which failure it was, and a bare reason list hides how much of the
+    corpus is missing. Ordered by frequency so the dominant cause reads first,
+    then by reason for a stable line across runs.
+    """
+    if not counts:
+        return ""
+    detail = "; ".join(
+        f"{n}x {reason}"
+        for reason, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    return (
+        f"{sum(counts.values())} deferred "
+        f"({len(counts)} distinct reason{'' if len(counts) == 1 else 's'}) — {detail}"
+    )
+
+
 # -- Sidecar ------------------------------------------------------------------
 
 

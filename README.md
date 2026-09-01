@@ -21,6 +21,37 @@ re-deriving it every session.
 > **License:** this project is **source-available** under the Hippocratic License
 > 3.0 — *not* OSI "open source." See `LICENSE`.
 
+## Requirements — read this before you deploy
+
+**This requires the Claude Code harness.** Not "works best with" — requires.
+
+Some of what makes this a substrate rather than a database is not in the MCP
+server at all; it lives in the harness. The infusion hook fires on
+`UserPromptSubmit`. The session trajectory is parsed from the harness
+transcript. `ESSG_INFUSE=auto` reads `CLAUDE_CODE_ENTRYPOINT` to tell a written
+prompt from a scheduled trigger. The locus identity — the thing that lets an
+agent rejoin its own chain after a restart — is the harness session id.
+
+Point another MCP client at this and the tools will work. You will get a graph
+with correct structure and **none of the constitution**: no infusion, no
+trajectory, no durable locus, and nothing telling you those are missing. That
+silence is the failure mode we care most about, so it is stated here rather
+than discovered later.
+
+Could it run under another harness with hooks — Gemini's, for instance? In
+principle, yes. **We do not test it and we do not support it.**
+
+The same applies to the matcher model, and for the same reason: the default is
+`gemini-3.5-flash-lite` because it was measured, against alternatives, with the
+negative results written down. Swap the harness, swap the model, swap the
+timeout — all of that is yours to do, and the license permits it.
+
+But be clear about what you have afterwards: **the thing you deploy is no
+longer the thing we built.** The measurements no longer describe it, the
+release notes no longer document it, and the failure modes we mapped are not
+the failure modes you will meet. That is not a warning against experimenting.
+It is a statement about what our evidence covers, so you can tell the two apart.
+
 ## The three layers
 
 - **Process** — `Encounter` (one work session) chained by `NEXT_ENCOUNTER`
@@ -224,6 +255,54 @@ The meaning sidecar lives inside the stack (the `sidecar_data` named volume,
 like `neo4j_data`) and builds itself from the graph on first boot — nothing
 to run, nothing on the host to lose. Without `GEMINI_API_KEY`, selection
 runs on the lexical fallback path and reports it.
+
+## Upgrading from v0.9.0 — run the migration
+
+**v0.10.0 changes the shape of the process layer, and your existing history
+does not move itself.** A `Locus` node now sits above the encounter chain, and
+every encounter must belong to one. Encounters written by v0.9.0 have no locus,
+so after the upgrade they are still in the graph, still correct, and no longer
+reachable from the layer the agent re-enters through.
+
+Nothing is deleted and nothing breaks loudly. That is the problem: the server
+starts, every tool answers, every write resolves, and the prior history sits
+detached with no error. So the server tells you instead — at startup it counts
+encounters belonging to no locus and names the remedy, and the same count rides
+the re-entry payload the agent reads before anything else.
+
+Run it once, after the upgrade:
+
+```bash
+docker exec kenning_encounter-mcp python -m kenning_encounter.migrate --apply
+```
+
+Without `--apply` it reports what it would do and writes nothing.
+
+**It only ever adds.** There is no `--reverse`, deliberately: nothing in this
+substrate is deleted, and a script reaching past the tools' own refusal to
+remove spine nodes would be doing unsupervised the one thing they forbid. The
+shape is check-then-write — it refuses before writing if the graph is not what
+it expects, and on a post-apply mismatch it reports and stops rather than
+undoing anything. Every write is a `MERGE`, so re-running is a no-op on what is
+already right, and correcting is forward. A wrong result leaves more structure
+than expected, never less.
+
+If you deploy without a shell into the container, an operator has to run this.
+It is not exposed as an MCP tool, and that is on purpose: a graph-wide write on
+an agent's accumulated experience is something a person performs and watches.
+
+### If you ran v0.9.0 without a `GEMINI_API_KEY`
+
+In v0.9.0 the meaning-sidecar reconcile sweep logged a node's **name** each time
+compression was unavailable — once per node, so a keyless first start wrote the
+whole graph's names to container stdout. In this substrate a node's name *is*
+content, not a label, so those logs read as an index of what the agent holds,
+in a file that carries none of the database's credentials.
+
+v0.10.0 logs shape only — counts and reasons, never names, enforced by a helper
+whose signature has no parameter a node can arrive through. If you ran v0.9.0
+keyless, treat the existing container logs as sensitive and rotate or clear
+them.
 
 ## Configuration
 

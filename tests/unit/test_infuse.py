@@ -488,7 +488,7 @@ class TestInfuseOrchestration:
             ("MATCH (a)-[r]-(b)", [
                 {"from_name": "obs-C", "rel": "GROUNDS", "to_name": "concept-A"},
             ]),
-            ("MATCH (n) WHERE n.name IN $names AND NOT n:Encounter", [
+            ("MATCH (n) WHERE n.name IN $names", [
                 {"name": "concept-A", "type": "Concept", "description": "held synthesis"},
                 {"name": "hyp-B", "type": "Hypothesis", "description": None},
                 {"name": "obs-C", "type": "Observation", "description": None},
@@ -531,7 +531,7 @@ class TestInfuseOrchestration:
                 {"node": "concept-A", "type": "Concept", "score": 0.7},
                 {"node": "obs-C", "type": "Observation", "score": 0.5},
             ]),
-            ("MATCH (n) WHERE n.name IN $names AND NOT n:Encounter", [
+            ("MATCH (n) WHERE n.name IN $names", [
                 {"name": "concept-A", "type": "Concept",
                  "description": "held synthesis " * 12},
                 {"name": "obs-C", "type": "Observation",
@@ -572,7 +572,7 @@ class TestInfuseOrchestration:
             ("gds.articleRank.stream", [
                 {"node": "concept-A", "type": "Concept", "score": 0.7},
             ]),
-            ("MATCH (n) WHERE n.name IN $names AND NOT n:Encounter", [
+            ("MATCH (n) WHERE n.name IN $names", [
                 {"name": "concept-A", "type": "Concept", "description": "d"},
                 {"name": "sibling-X", "type": "Observation", "description": "d2"},
             ]),
@@ -605,7 +605,7 @@ class TestInfuseOrchestration:
             ("gds.articleRank.stream", [
                 {"node": "concept-A", "type": "Concept", "score": 0.7},
             ]),
-            ("MATCH (n) WHERE n.name IN $names AND NOT n:Encounter", [
+            ("MATCH (n) WHERE n.name IN $names", [
                 {"name": "concept-A", "type": "Concept", "description": "d"},
             ]),
         ]
