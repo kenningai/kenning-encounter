@@ -781,6 +781,18 @@ class TestInfuseConfig:
             self._args(matcher_timeout_ms=50)
         )["matcher_timeout_ms"] == 100  # floor
 
+    def test_stateless_is_opt_in(self, monkeypatch):
+        monkeypatch.delenv("NEO4J_MCP_SERVER_STATELESS", raising=False)
+        assert process_config(self._args())["stateless_http"] is False
+        for off in ("", "false", "0", "no"):
+            monkeypatch.setenv("NEO4J_MCP_SERVER_STATELESS", off)
+            assert process_config(self._args())["stateless_http"] is False
+        for on in ("true", "1", "YES", " on "):
+            monkeypatch.setenv("NEO4J_MCP_SERVER_STATELESS", on)
+            assert process_config(self._args())["stateless_http"] is True
+        monkeypatch.delenv("NEO4J_MCP_SERVER_STATELESS")
+        assert process_config(self._args(server_stateless=True))["stateless_http"] is True
+
     def test_matcher_top_n_default_env_cli_clamp(self, monkeypatch):
         monkeypatch.delenv("NEO4J_MATCHER_TOP_N", raising=False)
         assert process_config(self._args())["matcher_top_n"] == 12

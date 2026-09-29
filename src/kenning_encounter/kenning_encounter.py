@@ -1063,7 +1063,8 @@ class Neo4jKenningEncounter:
         and the write-target resolver can no longer disagree about what a seal
         is. Each is annotated with its last-activity time (the latest
         RECORDED/CONSULTED anchoring, or the encounter's own t_exist if it
-        recorded nothing), any mechanical dissolved_at mark, and — since
+        recorded nothing), the retired dissolved_at mark only where an
+        encounter still carries it from before v0.12.0, and — since
         v0.12.4 — the Locus that opened it and whether that locus is
         anonymous.
 
@@ -1099,17 +1100,22 @@ class Neo4jKenningEncounter:
             {"exclude_eid": exclude_eid, "limit": limit},
             routing_=RoutingControl.READ,
         )
-        return [
-            {
+        rows: list[dict[str, Any]] = []
+        for r in result.records:
+            row: dict[str, Any] = {
                 "name": r["name"],
                 "t_exist": _neo4j_datetime_to_str(r["t_exist"]),
                 "last_active": _neo4j_datetime_to_str(r["last_active"]),
-                "dissolved_at": _neo4j_datetime_to_str(r["dissolved_at"]),
                 "locus": r["locus"],
                 "locus_anonymous": r["locus_anonymous"],
             }
-            for r in result.records
-        ]
+            # The retired mark appears only where history carries it. Nothing
+            # stamps it since v0.12.0, so a null on every row was a field
+            # describing an event that can no longer occur.
+            if r["dissolved_at"] is not None:
+                row["dissolved_at"] = _neo4j_datetime_to_str(r["dissolved_at"])
+            rows.append(row)
+        return rows
 
     async def _reentry_payload(
         self, recent: int, limit: int, current_eid: str | None = None
@@ -1128,8 +1134,8 @@ class Neo4jKenningEncounter:
 
         Also carries the unsealed set: every Encounter (other than the one just
         opened) whose ending was never examined, by the one shared predicate,
-        annotated with last-activity time, any mechanical dissolved_at mark,
-        and the Locus that opened it with whether that locus is anonymous. An
+        annotated with last-activity time, the retired dissolved_at mark only
+        where history carries it, and the Locus that opened it with whether that locus is anonymous. An
         unsealed encounter is a live sibling locus or an ending nobody
         examined — the graph still cannot tell which, so it surfaces and never
         classifies; but an anonymous locus is one no session can ever resolve

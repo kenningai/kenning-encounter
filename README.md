@@ -342,11 +342,22 @@ signature every time, so the agent knows too. Hook-side,
 user turns the hook parses from the harness transcript and sends as the
 trajectory; `0` disables and selection sees the prompt alone.
 
-HTTP sessions are always **stateful** — there is no stateless option, by
-design: an encounter depends on the state that preceded it (per-session
-chaining, session-scoped writes). The session identity is the harness session
-id, held in the graph; the `Mcp-Session-Id` keys only a cache that one
-`session_id` argument rebuilds after a restart. The `DELETE` teardown is
-honored.
+HTTP sessions are **stateful by default**. **Stateless is opt-in**: it is
+off unless you set `NEO4J_MCP_SERVER_STATELESS=true`. Either way the session
+identity is the Claude Code harness session id, held in the graph; the
+`Mcp-Session-Id` keys only a cache.
+
+Turn stateless on if restarting the server should not interrupt your Claude
+Code sessions. With stateful sessions, a restart erases them, and if the
+connection between Claude Code and the server does not start a new one (a
+stdio bridge such as supergateway does not), every call fails until you
+reconnect with `/mcp`. A stateless server issues no session, so there is
+nothing to go stale. The cost: every call that writes to a session must pass
+`session_id`, and `advance_encounter` refuses without one. Wire
+`scripts/kenning_encounter_session_start_hook.py` as a Claude Code
+SessionStart hook and the agent is handed its session id at every start.
+
+As with everything here, this is described and tested only as part of an
+agent bound to its memory through Claude Code hooks.
 
 Single-tenant: one agent, one memory graph, one Neo4j database.

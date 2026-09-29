@@ -183,6 +183,7 @@ def create_mcp_server(
     matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
     reconcile_retry: ReconcileRetry | None = None,
+    stateless_http: bool = False,
 ) -> FastMCP:
     """Create an MCP server instance for Kenning Encounter."""
 
@@ -303,6 +304,15 @@ def create_mcp_server(
         Example: {"name": "Encounter 2026-05-29T14:00 — service failover thread"}
         """
         async with _tool_errors("advance_encounter"):
+            if stateless_http and not session_id:
+                # No transport session exists to remember an anonymous locus
+                # between calls, so one minted here could never be written to
+                # again. Refuse loudly rather than mint an orphan.
+                raise ValueError(
+                    "This server runs stateless: pass session_id (your harness "
+                    "session id). Without it the encounter could not be "
+                    "addressed by any later call."
+                )
             result = await kenning_encounter.advance_encounter(
                 name=name, recent=recent, limit=limit,
                 session_id=session_id,
@@ -1431,6 +1441,7 @@ async def main(
     matcher_timeout_ms: int = 5000,
     matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
+    stateless_http: bool = False,
 ) -> None:
     logger.info("Starting Kenning Encounter MCP Server")
     logger.info(f"Connecting to Neo4j at: {neo4j_uri}")
@@ -1594,21 +1605,23 @@ async def main(
         matcher_top_n=matcher_top_n,
         matcher_sidecar=matcher_sidecar,
         reconcile_retry=reconcile_retry,
+        stateless_http=stateless_http,
     )
 
     try:
         match transport:
             case "streamable-http" | "http":
-                # Always stateful, by design: an Encounter depends on the
-                # states that preceded it (per-locus chaining, locus-scoped
-                # writes), so the session — whose Mcp-Session-Id keys the
-                # write-target cache — must persist between calls. There is
-                # no stateless mode.
+                # Stateful by default. Stateless (opt-in) issues no
+                # Mcp-Session-Id, so a server restart leaves no stale session
+                # for any client or bridge to hold. Continuity does not depend
+                # on the transport session since the locus identity moved into
+                # the graph (session_id); in stateless mode every locus-scoped
+                # call must carry it.
                 await mcp.run_http_async(
                     host=host, port=port, path=path,
                     middleware=custom_middleware,
                     transport="streamable-http",
-                    stateless_http=False,
+                    stateless_http=stateless_http,
                 )
             case "stdio":
                 await mcp.run_stdio_async()

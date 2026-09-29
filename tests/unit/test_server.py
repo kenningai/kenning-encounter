@@ -911,6 +911,23 @@ class TestUnsealedSurfacesTheLocus:
         assert rows[0]["locus"] is None
         assert rows[0]["locus_anonymous"] is None
 
+    async def test_the_retired_mark_appears_only_where_history_carries_it(self):
+        """Nothing stamps dissolved_at since v0.12.0: a null key on every row
+        described an event that can no longer occur. An encounter that still
+        carries the old mark keeps reporting it."""
+        from neo4j.time import DateTime
+        driver = FakeDriver(script=[("MATCH (e:Encounter) WHERE", [
+            {"name": "E-now", "t_exist": None, "last_active": None,
+             "dissolved_at": None, "locus": "Locus sess-A",
+             "locus_anonymous": False},
+            {"name": "E-era", "t_exist": None, "last_active": None,
+             "dissolved_at": DateTime(2026, 6, 12, 1, 2, 3),
+             "locus": None, "locus_anonymous": None},
+        ])])
+        rows = await Neo4jKenningEncounter(driver)._unsealed(limit=10)  # type: ignore[arg-type]
+        assert "dissolved_at" not in rows[0]
+        assert rows[1]["dissolved_at"].startswith("2026-06-12")
+
     async def test_the_attribution_is_an_optional_match(self):
         driver = FakeDriver(script=[("MATCH (e:Encounter) WHERE", [])])
         await Neo4jKenningEncounter(driver)._unsealed(limit=10)  # type: ignore[arg-type]

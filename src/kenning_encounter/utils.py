@@ -247,12 +247,19 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
         or "models/meaning_sidecar.json"
     )
 
-    # No stateless-HTTP option, by design (v0.3.0). Encounters within a session
-    # are stateful by definition — they depend on the states that preceded them
-    # (per-locus chaining, locus-scoped write targeting) — so HTTP sessions are
-    # always stateful: the server issues an Mcp-Session-Id (keying the
-    # write-target cache; the locus identity is the harness session id, held
-    # in the graph) and honors the DELETE session-teardown.
+    # Streamable-HTTP sessions: stateful by default, stateless on opt-in.
+    # v0.3.0 made them always stateful because the transport session WAS the
+    # locus key. Since v0.12.0 the locus identity is the harness session id,
+    # held in the graph; the transport session keys only a cache. A stateful
+    # server loses its sessions on restart, and a client or bridge that does
+    # not re-initialize on the spec's 404 then fails every call until someone
+    # reconnects it by hand. Stateless issues no session, so there is nothing
+    # to go stale; every locus-scoped call must then pass session_id.
+    st = getattr(args, "server_stateless", None)
+    if st is None:
+        st = (os.getenv("NEO4J_MCP_SERVER_STATELESS") or "").strip().lower() in (
+            "1", "true", "yes", "on")
+    config["stateless_http"] = bool(st)
 
     return config
 

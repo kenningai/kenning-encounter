@@ -28,6 +28,13 @@ def main():
     )
     parser.add_argument("--server-path", default=None, help="HTTP path (default: /mcp/)")
     parser.add_argument(
+        "--server-stateless", action="store_true", default=None,
+        help=(
+            "Streamable-HTTP without sessions: a restart leaves nothing stale "
+            "for a client to hold; every locus-scoped call must pass session_id"
+        ),
+    )
+    parser.add_argument(
         "--allow-origins", default=None,
         help="Comma-separated list of allowed CORS origins",
     )

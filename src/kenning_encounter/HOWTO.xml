@@ -227,13 +227,13 @@
     advanced or has already closed — with no encounter open for your session,
     create_entities refuses.
   </invariant>
-  <invariant name="the-explicit-handle">
-    close_encounter and create_entities address your session's open encounter
-    automatically (sessions are always stateful). If the server restarted and
-    lost your session's state mid-encounter, pass the encounter's name via the
-    'encounter' parameter to return to the encounter you opened —
-    advance_encounter returned it. The handle says WHICH encounter your writes
-    belong to; it is never a license to write into someone else's.
+  <invariant name="the-identity-you-carry">
+    close_encounter and create_entities address your session's open encounter,
+    found in the graph by session_id, your harness session id. Pass it on every
+    advance_encounter, create_entities and close_encounter: it survives a server
+    restart and a /resume, and a server running stateless requires it. It only
+    ever reaches your own session's encounters; it is never a license to write
+    into someone else's.
   </invariant>
 </encounter-cycle>
 
