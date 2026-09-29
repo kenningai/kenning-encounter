@@ -38,3 +38,8 @@ EXPERIENCE_HOWTO.xml
 
 # macOS Finder metadata — never part of a release
 .DS_Store
+
+# Working research and build drafts — local only, never pushed to GitHub.
+# Measurement dumps, vendor exports and scratch that has no business in a
+# release surface — and may carry credentials pulled from a live system.
+docs/research/

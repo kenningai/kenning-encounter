@@ -113,12 +113,12 @@ class TestMigrationIsIdempotent:
 
 
 class TestMigrationCoexistsWithALiveServer:
-    """The order I had not tested: upgrade, WORK FOR A WHILE, then migrate.
+    """The realistic order: upgrade, WORK FOR A WHILE, then migrate.
 
-    v0.12.0-.2 were only ever run against a virgin upgrade — migrate first,
-    then use. A real operator starts the server, works, reads the warning, and
-    migrates afterwards, and by then the graph holds loci the server made. Both
-    defects below were found that way, on the built artifact, not by reading."""
+    A virgin upgrade — migrate first, then use — is the easy case and not the
+    common one. A real operator starts the server, works, reads the warning,
+    and migrates afterwards, and by then the graph holds loci the server made.
+    """
 
     def test_it_does_not_mint_a_second_locus_for_an_already_held_head(self):
         """A chain head created by the running server already HAS a locus.
@@ -162,9 +162,11 @@ class TestMigrationCoexistsWithALiveServer:
         assert "correct forward" in src
 
     def test_it_refuses_before_writing_since_there_is_no_undo(self):
-        """Pre-flight, and each check is a defect this migration actually had:
-        a non-unique key that silently merged two instantiations, and a second
-        locus minted for a head the running server already held."""
+        """Pre-flight, and each check guards a way the migration can go wrong
+        without saying so: a non-unique key that silently merges two
+        instantiations, and a second locus minted for a head the running
+        server already holds.
+        """
         src = RUNNER.read_text()
         assert "REFUSED before writing" in src
         assert "share an identity key" in src
@@ -269,7 +271,8 @@ class TestUnmigratedSpineGuard:
         """No log handler is attached anywhere in this package, so
         logging.lastResort handles records and it sits at WARNING. An INFO
         line here would be discarded and the guard would be decorative —
-        which is the same absence-held guarantee v0.11.2 documented."""
+        which is an absence-held guarantee: nothing enforces it but the
+        deliberate decision not to attach a handler."""
         g = self._guard()
         assert "logger.warning(" in g
         assert "logger.info(" not in g
@@ -286,14 +289,12 @@ class TestUnmigratedSpineGuard:
             assert verb not in g, f"the guard must not {verb}"
 
     def test_the_reentry_payload_carries_it_because_that_is_what_the_agent_reads(self):
-        """v0.12.2 sent this to `docker logs` — which addresses an OPERATOR
-        watching a container start. The required harness is Claude Code, so
-        the reader is an AGENT, and an agent sees tool returns, never a
-        container log. A guard the reader cannot reach is not a guard.
+        """A startup warning in `docker logs` addresses an OPERATOR watching
+        a container start. The required harness is Claude Code, so the reader
+        is an AGENT, and an agent sees tool returns, never a container log.
+        A guard the reader cannot reach is not a guard.
 
-        Third instance in three releases of getting the reader wrong: content
-        to the wrong destination (v0.11.2), no reader at all (v0.12.2), and a
-        reader who could not get to it (this)."""
+        """
         kenning_encounter_src = (Path(__file__).resolve().parents[2] / "src"
                     / "kenning_encounter" / "kenning_encounter.py").read_text()
         assert "_orphaned_encounter_count" in kenning_encounter_src
@@ -301,10 +302,9 @@ class TestUnmigratedSpineGuard:
         assert '"remedy": "python -m kenning_encounter.migrate --apply"' in kenning_encounter_src
 
     def test_the_reentry_block_is_present_only_when_wrong(self):
-        """A standing 'spine: healthy' line would be noise on every re-entry —
-        and worse, it is the reassuring shape this project keeps catching. The
-        deferral summary prints nothing on an empty tally for the same
-        reason."""
+        """A standing 'spine: healthy' line would be noise on every re-entry,
+        and worse, it is a reassuring shape that reports nothing. The deferral
+        summary prints nothing on an empty tally for the same reason."""
         kenning_encounter_src = (Path(__file__).resolve().parents[2] / "src"
                     / "kenning_encounter" / "kenning_encounter.py").read_text()
         i = kenning_encounter_src.index("orphaned = await self._orphaned_encounter_count()")

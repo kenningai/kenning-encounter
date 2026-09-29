@@ -18,6 +18,7 @@ from kenning_encounter.infuse import (
     format_progression,
     group_progressions,
     lucene_query,
+    matcher_fallback_note,
     progression_renewal,
     renewal_filter_edges,
     renewal_partition,
@@ -342,6 +343,29 @@ class TestFormatPayload:
         assert "OPEN THREADS" in p and "an open question" in p
         assert "TRAJECTORY" not in p  # first to yield
         assert "CORE TENSION" in p and "PARKED TENSIONS" in p
+
+    def test_fallback_note_rides_the_signature_and_survives_the_squeeze(self):
+        note = matcher_fallback_note({
+            "channel": "lexical_fallback",
+            "fallback_reason": "match failed: HTTPStatusError: 402 Payment Required",
+        })
+        p = _payload(selection_note=note, max_chars=600)
+        lines = p.splitlines()
+        assert lines[0].startswith("[substrate proposal")
+        assert lines[1].startswith("[matcher unavailable")
+        assert "402 Payment Required" in lines[1]
+
+    def test_no_note_when_the_matcher_ran(self):
+        assert matcher_fallback_note({"channel": "meaning", "ms": 900}) is None
+        assert matcher_fallback_note(None) is None
+        p = _payload(selection_note=matcher_fallback_note({"channel": "meaning"}))
+        assert "matcher unavailable" not in p
+
+    def test_fallback_reason_is_bounded(self):
+        note = matcher_fallback_note(
+            {"channel": "lexical_fallback", "fallback_reason": "x" * 5000}
+        )
+        assert note is not None and len(note) < 300
 
     def test_frontier_only_header(self):
         p = _payload(seed_terms=[], seed_mode="frontier_only")
@@ -697,7 +721,7 @@ class TestInfuseConfig:
             read_timeout=None, infuse_frontier_bias=None,
             infuse_refresh_turns=None,
             matcher_endpoint=None, matcher_model=None,
-            matcher_timeout_ms=None, matcher_sidecar=None,
+            matcher_timeout_ms=None, matcher_top_n=None, matcher_sidecar=None,
         )
         base.update(overrides)
         return argparse.Namespace(**base)
@@ -756,6 +780,16 @@ class TestInfuseConfig:
         assert process_config(
             self._args(matcher_timeout_ms=50)
         )["matcher_timeout_ms"] == 100  # floor
+
+    def test_matcher_top_n_default_env_cli_clamp(self, monkeypatch):
+        monkeypatch.delenv("NEO4J_MATCHER_TOP_N", raising=False)
+        assert process_config(self._args())["matcher_top_n"] == 12
+        monkeypatch.setenv("NEO4J_MATCHER_TOP_N", "6")
+        assert process_config(self._args())["matcher_top_n"] == 6
+        assert process_config(self._args(matcher_top_n=4))["matcher_top_n"] == 4
+        # Ceiling is the seed limit: infuse keeps at most 12 seeds.
+        assert process_config(self._args(matcher_top_n=40))["matcher_top_n"] == 12
+        assert process_config(self._args(matcher_top_n=0))["matcher_top_n"] == 1
 
 
 # -- Progression assembly (v0.8.0, the progression reform) -----------------------

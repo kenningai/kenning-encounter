@@ -11,7 +11,7 @@
 // recorded "the server discarded this locus's state while the encounter was
 // unsealed", and an authored seal was the only thing that could disprove it.
 // Nothing stamps it now, because nothing can lose the locus: it is a node,
-// and the open encounter is a graph read. The 12 encounters carrying the
+// and the open encounter is a graph read. Encounters carrying the
 // historical mark keep it untouched — a record of an era, not a flag to
 // clean up.
 MATCH (e:Encounter) WHERE elementId(e) = $eid

@@ -4,7 +4,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from neo4j import (
     AsyncGraphDatabase,
@@ -33,6 +33,7 @@ from .kenning_encounter import (
     PROCESS_TYPES,
     PROCESS_EDGES,
     not_process_node,
+    _SERVER_VERSION,
 )
 from .meaning import (
     MeaningIndex,
@@ -115,6 +116,60 @@ def _transport_session(ctx: Context) -> str | None:
 
 # -- Server Factory -----------------------------------------------------------
 
+class ReconcileRetry:
+    """Re-runs the sidecar reconcile once the matcher's backend recovers.
+
+    The startup sweep and the on-write trigger both defer a node whose
+    compression fails, and before this nothing retried a deferral until the
+    next restart. An outage that outlived the startup sweep (exhausted
+    credits, a network gap) left every node written during it without a
+    meaning, invisible as a matcher seed, until someone happened to restart
+    the container. "Maintains itself" held only if a restart followed the
+    outage.
+
+    A deferral records DEBT. The next compression or match that succeeds is
+    evidence the backend is back, and pays it: one reconcile run, never two
+    at once, and never sooner than `min_interval_s` after the last, so a
+    backend that matches but cannot compress costs one sweep per interval,
+    not one per prompt.
+    """
+
+    def __init__(
+        self,
+        min_interval_s: float = 600.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.run: Callable[[], Awaitable[None]] | None = None
+        self.debt = False
+        self.min_interval_s = min_interval_s
+        self._clock = clock
+        self._running = False
+        self._last: float | None = None
+
+    def owe(self) -> None:
+        self.debt = True
+
+    def recovered(self) -> bool:
+        """Schedule the retry if owed and allowed; True when scheduled."""
+        if not self.debt or self._running or self.run is None:
+            return False
+        now = self._clock()
+        if self._last is not None and now - self._last < self.min_interval_s:
+            return False
+        self.debt = False  # the sweep re-owes if it defers again
+        self._running = True
+        self._last = now
+        asyncio.create_task(self._go())
+        return True
+
+    async def _go(self) -> None:
+        try:
+            assert self.run is not None
+            await self.run()
+        finally:
+            self._running = False
+
+
 def create_mcp_server(
     kenning_encounter: Neo4jKenningEncounter,
     namespace: str = "",
@@ -125,14 +180,28 @@ def create_mcp_server(
     matcher_endpoint: str = "https://generativelanguage.googleapis.com/v1beta",
     matcher_model: str = "gemini-3.5-flash-lite",
     matcher_timeout_ms: int = 5000,
+    matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
+    reconcile_retry: ReconcileRetry | None = None,
 ) -> FastMCP:
     """Create an MCP server instance for Kenning Encounter."""
 
     ns = format_namespace(namespace)
-    mcp: FastMCP = FastMCP("kenning-encounter")
+    # The handshake's serverInfo.version. Without it FastMCP advertises its
+    # own library version, so a client saw the framework's version whatever
+    # release was running.
+    mcp: FastMCP = FastMCP("kenning-encounter", version=_SERVER_VERSION)
 
     meaning_index = MeaningIndex(matcher_sidecar)
+    fallback_warned: set[str] = set()
+
+    def _prefix_tokens() -> int:
+        """Approximate matcher prefix size (chars/4) — what a context window
+        is compared against. 0 when the sidecar cannot be read."""
+        try:
+            return len(meaning_index.prefix()[0]) // 4
+        except MeaningUnavailable:
+            return 0
 
     async def _sidecar_meaning_make(nodes: list[dict[str, Any]]) -> None:
         """The on-write trigger: compress newly created/edited nodes into
@@ -162,8 +231,12 @@ def create_mcp_server(
                 logger.info(
                     f"sidecar: meaning-made {len(entries)} node(s) on write"
                 )
+                if reconcile_retry:
+                    reconcile_retry.recovered()
         except Exception as e:
             logger.warning(f"sidecar on-write compression deferred: {e}")
+            if reconcile_retry:
+                reconcile_retry.owe()
 
     # -- Process Layer (the guarded spine) ------------------------------------
 
@@ -273,6 +346,11 @@ def create_mcp_server(
         Even a confirmation-only run should close with a summary — a measured
         null, examined and confirmed with nothing restructured, is a real
         temporal event rather than an empty one.
+
+        summary and report are two SEPARATE parameters, each plain prose. A
+        value containing a parameter or invoke tag means a second parameter
+        was written inside the first; that seal is REFUSED (nothing written)
+        rather than stored damaged, because a seal can never be revised.
 
         AND IF YOU NEVER GET HERE, THAT IS ALSO A RECORD. Conversations stop;
         they are not closed by ritual, and an encounter carrying no seal is
@@ -810,6 +888,35 @@ def create_mcp_server(
             return _json_result([dict(r) for r in result.records])
 
     @mcp.tool(
+        name=ns + "gds_articlerank",
+        annotations=ToolAnnotations(
+            title="GDS ArticleRank", readOnlyHint=True,
+            destructiveHint=False, idempotentHint=True, openWorldHint=False,
+        ),
+    )
+    async def gds_articlerank(
+        projection: str = Field(..., description="Name of the graph projection"),
+        result_limit: int = Field(default=20, ge=1, le=1000, description="Max results (default 20)"),
+    ) -> ToolResult:
+        """Run ArticleRank — centrality with hub transmission damped.
+
+        orient's MASS reading, scoped to your projection. A node that ranks
+        high under gds_pagerank and falls here borrows its centrality from
+        hubs that point at everything — the gravity well, visible as the gap
+        between the two. Run both on the same projection to see it.
+        """
+        async with _tool_errors("gds_articlerank"):
+            result = await kenning_encounter.driver.execute_query(
+                "CALL gds.articleRank.stream($projection) YIELD nodeId, score "
+                "RETURN gds.util.asNode(nodeId).name AS node, "
+                "labels(gds.util.asNode(nodeId))[0] AS type, score "
+                "ORDER BY score DESC LIMIT $result_limit",
+                parameters_={"projection": projection, "result_limit": result_limit},
+                routing_=RoutingControl.READ,
+            )
+            return _json_result([dict(r) for r in result.records])
+
+    @mcp.tool(
         name=ns + "gds_betweenness",
         annotations=ToolAnnotations(
             title="GDS Betweenness Centrality", readOnlyHint=True,
@@ -1043,7 +1150,7 @@ def create_mcp_server(
                     trajectory or [], text
                 )
                 matched = await match_meanings(
-                    prefix, ordered_names, traj_text, 12,
+                    prefix, ordered_names, traj_text, matcher_top_n,
                     matcher_api_key, matcher_model, matcher_endpoint,
                     timeout_ms=matcher_timeout_ms,
                 )
@@ -1064,13 +1171,27 @@ def create_mcp_server(
                     "trajectory": traj_meta,
                     "sidecar_size": meaning_index.size,
                 }
+                fallback_warned.clear()  # a recurrence after recovery re-warns
+                if reconcile_retry:
+                    reconcile_retry.recovered()
             except MeaningUnavailable as e:
                 # Fallback is a reported result, not an error: the
-                # lexical path below is the pre-v0.9.0 behaviour.
+                # lexical path below is the pre-v0.9.0 behaviour. It is
+                # also LOUD — once per distinct reason to the operator's
+                # log, and every time to the agent in the payload header
+                # (matcher_fallback_note). Reason text is exception shape.
                 selection_meta = {
                     "channel": "lexical_fallback",
                     "fallback_reason": str(e),
                 }
+                if str(e) not in fallback_warned:
+                    fallback_warned.add(str(e))
+                    logger.warning(
+                        "meaning matcher unavailable — infusion seeds are "
+                        "LEXICAL until this clears: %s (sidecar %d nodes, "
+                        "prefix ~%d tokens)",
+                        e, meaning_index.size, _prefix_tokens(),
+                    )
             result = await kenning_encounter.infuse(
                 text=text,
                 frontier_bias=(
@@ -1308,6 +1429,7 @@ async def main(
     matcher_endpoint: str = "https://generativelanguage.googleapis.com/v1beta",
     matcher_model: str = "gemini-3.5-flash-lite",
     matcher_timeout_ms: int = 5000,
+    matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
 ) -> None:
     logger.info("Starting Kenning Encounter MCP Server")
@@ -1346,6 +1468,8 @@ async def main(
     # two together are what makes the sidecar automatic rather than a
     # human's chore. Writes only the sidecar file; the graph is read-only
     # to this entire path.
+    reconcile_retry = ReconcileRetry()
+
     async def _sidecar_reconcile() -> None:
         try:
             index = MeaningIndex(matcher_sidecar)
@@ -1391,6 +1515,7 @@ async def main(
                     record_deferral(deferred, e)
             if deferred:
                 logger.warning(f"sidecar reconcile: {deferral_summary(deferred)}")
+                reconcile_retry.owe()
             logger.info(
                 f"sidecar reconcile: {done}/{len(to_compress)} compressed, "
                 f"{len(to_remove)} removed, corpus {len(graph_nodes)}"
@@ -1442,6 +1567,7 @@ async def main(
 
     asyncio.create_task(_spine_guard())
 
+    reconcile_retry.run = _sidecar_reconcile
     asyncio.create_task(_sidecar_reconcile())
 
     custom_middleware = [
@@ -1465,7 +1591,9 @@ async def main(
         matcher_endpoint=matcher_endpoint,
         matcher_model=matcher_model,
         matcher_timeout_ms=matcher_timeout_ms,
+        matcher_top_n=matcher_top_n,
         matcher_sidecar=matcher_sidecar,
+        reconcile_retry=reconcile_retry,
     )
 
     try:
@@ -1473,8 +1601,9 @@ async def main(
             case "streamable-http" | "http":
                 # Always stateful, by design: an Encounter depends on the
                 # states that preceded it (per-locus chaining, locus-scoped
-                # writes), so the session — whose Mcp-Session-Id IS the locus
-                # key — must persist between calls. There is no stateless mode.
+                # writes), so the session — whose Mcp-Session-Id keys the
+                # write-target cache — must persist between calls. There is
+                # no stateless mode.
                 await mcp.run_http_async(
                     host=host, port=port, path=path,
                     middleware=custom_middleware,

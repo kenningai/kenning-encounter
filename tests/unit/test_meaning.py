@@ -37,15 +37,47 @@ NODES = {
 
 
 class TestBuildPrefix:
-    def test_sorted_numbering_and_header(self):
+    def test_insertion_numbering_and_header(self):
         prefix, ordered = build_prefix(NODES)
-        assert ordered == ["Alpha observation", "Mid note", "Zeta concept"]
+        assert ordered == ["Zeta concept", "Alpha observation", "Mid note"]
         assert prefix.startswith(MATCHER_HEADER)
-        assert "1. Alpha observation :: About a." in prefix
-        assert "3. Zeta concept :: About z." in prefix
+        assert "1. Zeta concept :: About z." in prefix
+        assert "3. Mid note :: About m." in prefix
 
     def test_deterministic_bytes(self):
-        assert build_prefix(NODES) == build_prefix(dict(reversed(NODES.items())))
+        assert build_prefix(NODES) == build_prefix(dict(NODES.items()))
+
+    def test_order_is_the_sidecars_not_the_alphabets(self):
+        """Two-sided against the old behaviour: the same nodes in a
+        different file order number differently — sorting is gone."""
+        assert build_prefix(NODES) != build_prefix(dict(reversed(NODES.items())))
+
+
+class TestPrefixSurvivesWrites:
+    """The prefix is a cache key: a write must leave every line before it
+    byte-identical, through the real store, not only through build_prefix."""
+
+    def _index(self, tmp_path):
+        idx = MeaningIndex(tmp_path / "sidecar.json")
+        idx.upsert(dict(NODES))
+        return idx
+
+    def test_append_leaves_existing_prefix_byte_identical(self, tmp_path):
+        idx = self._index(tmp_path)
+        before, _ = idx.prefix()
+        # "Aardvark" sorts FIRST — under name order this renumbered all.
+        idx.upsert({"Aardvark": {"type": "Note", "meaning": "New.", "hash": "d"}})
+        after, ordered = idx.prefix()
+        assert after.startswith(before)
+        assert ordered[-1] == "Aardvark"
+
+    def test_edit_keeps_position(self, tmp_path):
+        idx = self._index(tmp_path)
+        idx.upsert({"Alpha observation": {"type": "Observation", "meaning": "Revised.", "hash": "e"}})
+        prefix, ordered = idx.prefix()
+        assert ordered.index("Alpha observation") == 1
+        assert "1. Zeta concept :: About z." in prefix  # line before it untouched
+        assert "2. Alpha observation :: Revised." in prefix
 
     def test_meaning_whitespace_collapsed(self):
         prefix, _ = build_prefix(NODES)

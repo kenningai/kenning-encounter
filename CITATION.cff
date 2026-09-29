@@ -22,8 +22,8 @@ url: https://kenningai.com
 # The Hippocratic License 3.0 (SV) has no SPDX identifier, so the machine-
 # readable field is the licence URL rather than `license:`.
 license-url: https://firstdonoharm.dev/version/3/0/sv.md
-version: 0.9.0
-date-released: '2026-08-27'
+version: 0.11.0
+date-released: '2026-09-29'
 keywords:
   - agent substrate
   - temporal causality

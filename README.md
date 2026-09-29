@@ -54,15 +54,18 @@ It is a statement about what our evidence covers, so you can tell the two apart.
 
 ## The three layers
 
-- **Process** — `Encounter` (one work session) chained by `NEXT_ENCOUNTER`
-  **per session**: each session's encounters form one clean fork-free path, and
-  a session's first encounter is anchored by `INSTANTIATED_AFTER` to whichever
-  encounter was latest when the session began (writes are serialized, so that
-  order is exact). Concurrent sessions — multiple agents over one memory —
-  therefore branch without ever corrupting each other's chains, and the whole
-  spine stays one connected, temporally ordered structure. Written only by the
-  guarded `advance_encounter` / `close_encounter`. Encounters are never
-  deletable — the spine is the record, not editable content.
+- **Process** — `Locus` (one agent session, keyed by the harness session id,
+  so it survives `/resume` and a server restart) and `Encounter` (one unit of
+  work within it). `NEXT_LOCUS` orders sessions by when they began — sessions
+  overlap, but their starts are serialized writes, so that order is exact.
+  `NEXT_ENCOUNTER` chains encounters **within** one session into one clean
+  fork-free path that never crosses into another; `OPENED` ties each encounter
+  to exactly one session. Concurrent sessions — multiple agents over one
+  memory — therefore never corrupt each other's chains, and encounters in
+  different sessions are left unordered rather than ordered by wall clock.
+  Written only by the guarded `advance_encounter`; `close_encounter` stamps
+  the seal and nothing else. Encounters are never deletable — the spine is the
+  record, not editable content.
 - **Semantic** — `Observation` / `Question` / `Hypothesis` / `Concept` / `Note`.
   What the agent has come to understand: noticings, open threads, working
   explanations, syntheses.
@@ -72,14 +75,16 @@ It is a statement about what our evidence covers, so you can tell the two apart.
 
 ## Tool surface
 
-- **Session:** `advance_encounter` (opens an encounter chained from *your
-  session's* previous one; returns the re-entry payload — recent sessions, open
-  questions, live hypotheses, recent concepts, and the **unsealed set**: any
-  encounters left open elsewhere, with last-activity times), `close_encounter`
-  (seals *your session's* encounter — a concurrent session can't capture it;
-  accepts an explicit `encounter` name if the server restarted mid-session).
-  Encounters left open when the server discards session state get a mechanical
-  `dissolved_at` timestamp — never an auto-written summary.
+- **Session:** `advance_encounter` (takes the harness `session_id` and finds
+  *your session's* chain in the graph — no predecessor to pass; without an id
+  it starts an anonymous session that can't be rejoined after a restart;
+  returns the re-entry payload — recent sessions, open questions, live
+  hypotheses, recent concepts, and the **unsealed set**: encounters with no
+  seal, with last-activity times, their session, and whether that session is
+  anonymous), `close_encounter` (seals *your session's* open encounter,
+  resolved from the graph — a concurrent session can't capture it; pass
+  `session_id` again after a server restart). An encounter nobody sealed stays
+  unsealed — never an auto-written summary.
 - **Write:** `create_entities` (auto-anchored to *your session's* open encounter),
   `create_relations` (the agent's authored links; `SUPERSEDES` carries a required
   `revision_why` — a revision records what changed and why), `delete_entities`,
@@ -102,7 +107,10 @@ It is a statement about what our evidence covers, so you can tell the two apart.
   risers, fallers, new). Plus the **frontier** view of where the graph is
   thinnest (unanswered questions, untested hypotheses, ungrounded concepts).
   For focused questions: `gds_create_projection` → `gds_pagerank` /
-  `gds_betweenness` / `gds_leiden` / `gds_wcc` → `gds_drop_projection`.
+  `gds_articlerank` / `gds_betweenness` / `gds_leiden` / `gds_wcc` →
+  `gds_drop_projection`. Running PageRank and ArticleRank on the same
+  projection shows which nodes owe their centrality to hubs that link to
+  everything — the rich-get-richer effect, measured.
 - **Infusion:** `infuse` — the *unasked* recall channel; see the next section.
 
 The operations manual is served as the MCP resource `kenning-encounter://howto` and
@@ -321,15 +329,24 @@ orient and infusion both — while leaving it fully queryable.
 Meaning matcher: `GEMINI_API_KEY` (env only, never argv),
 `NEO4J_MATCHER_MODEL` (default `gemini-3.5-flash-lite`),
 `NEO4J_MATCHER_ENDPOINT`, `NEO4J_MATCHER_TIMEOUT_MS` (default `5000` —
-sized to the measured reasoning tail, not the median), and
-`NEO4J_MATCHER_SIDECAR` (container path of the sidecar file). Hook-side,
+sized to the measured reasoning tail, not the median),
+`NEO4J_MATCHER_TOP_N` (default `12`, the most seeds infusion keeps —
+output tokens dominate a warm matcher call, so lowering this is the
+latency lever on a slow backend), and `NEO4J_MATCHER_SIDECAR` (container
+path of the sidecar file). When the matcher cannot run — no key, an
+exhausted quota, a prompt larger than the endpoint accepts — infusion
+falls back to lexical seeds and says so: one WARN per distinct reason in
+the container log, and a `[matcher unavailable …]` line under the payload
+signature every time, so the agent knows too. Hook-side,
 `KENNING_ENCOUNTER_INFUSE_TRAJECTORY_TURNS` (default `7`) sets how many prior
 user turns the hook parses from the harness transcript and sends as the
 trajectory; `0` disables and selection sees the prompt alone.
 
 HTTP sessions are always **stateful** — there is no stateless option, by
 design: an encounter depends on the state that preceded it (per-session
-chaining, session-scoped writes), so the `Mcp-Session-Id` carries the session
-identity and the `DELETE` teardown is honored.
+chaining, session-scoped writes). The session identity is the harness session
+id, held in the graph; the `Mcp-Session-Id` keys only a cache that one
+`session_id` argument rebuilds after a restart. The `DELETE` teardown is
+honored.
 
 Single-tenant: one agent, one memory graph, one Neo4j database.

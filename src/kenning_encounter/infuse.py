@@ -54,8 +54,8 @@ _STOPWORDS = frozenset(
 )
 
 # Harness-envelope noise — vocabulary the transport wraps around the content,
-# never the content itself. Measured live (the 2026-08-07 waking's own payload
-# headers): task-notification plumbing consumed entire seed budgets, and
+# never the content itself. Measured live on a real payload's own transport
+# headers: task-notification plumbing consumed entire seed budgets, and
 # because these tokens are identifier-shaped they rode the hard-signal weight.
 # Three classes, each named in the B1 follow-up work order:
 #   (1) harness-minted identifiers — mcp__<server>__<tool> names and toolu_*
@@ -365,7 +365,7 @@ def renewal_filter_edges(
     return kept
 # -- Progression assembly (v0.8.0, the progression reform) --------------------------
 
-# The knowledge-vs-data repair (design of record, 2026-08-11): data means
+# The knowledge-vs-data repair: data means
 # nothing until connected in time to other data, and an LLM handed two
 # contradictory observations about one subject WITHOUT their temporal ordering
 # must fabricate the connection — confabulation as the necessary consequence
@@ -688,6 +688,31 @@ def _conflict_line(c: dict[str, Any]) -> str:
     return line
 
 
+_FALLBACK_REASON_CHARS = 160
+
+
+def matcher_fallback_note(selection_meta: dict[str, Any] | None) -> str | None:
+    """The line that tells the AGENT its seeds were not meaning-matched.
+
+    selection_meta alone reached no reader: it rides the tool result into an
+    observe log that is usually unset. A deployment with a valid endpoint, a
+    valid model and a populated sidecar can then run on the lexical path for
+    weeks with nothing saying so. A prompt larger than the endpoint's context
+    window does it, and so does an exhausted prepaid balance. The header is
+    what the agent reads before anything else, so the reason goes there.
+    Reason text is exception shape (status, URL, counts), never node content.
+    """
+    if not selection_meta or selection_meta.get("channel") != "lexical_fallback":
+        return None
+    reason = " ".join(str(selection_meta.get("fallback_reason", "")).split())
+    if len(reason) > _FALLBACK_REASON_CHARS:
+        reason = reason[: _FALLBACK_REASON_CHARS - 1] + "…"
+    return (
+        "[matcher unavailable — seeds below are LEXICAL keyword matches, not "
+        f"meaning-matched: {reason or 'no reason given'}]"
+    )
+
+
 def format_payload(
     seed_terms: list[str],
     seed_mode: str,
@@ -700,6 +725,7 @@ def format_payload(
     max_chars: int = _MAX_PAYLOAD_CHARS,
     standing_nodes: list[dict[str, Any]] | None = None,
     progressions: list[dict[str, Any]] | None = None,
+    selection_note: str | None = None,
 ) -> tuple[str, dict[str, list[str]]]:
     """Assemble the signed governed payload, coherence tension first.
 
@@ -733,6 +759,9 @@ def format_payload(
         f"[substrate proposal — awakened from: {', '.join(seed_terms) or '(frontier only)'}"
         f" | seed mode: {seed_mode} | a proposal from the sediment, not a conclusion]"
     )
+    # Part of the signature: laid down first, never yields to the budget.
+    if selection_note:
+        header = f"{header}\n{selection_note}"
 
     core_lines: list[str] = []
     if core_conflicts:

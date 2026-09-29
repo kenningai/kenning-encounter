@@ -75,6 +75,13 @@ def main():
         ),
     )
     parser.add_argument(
+        "--matcher-top-n", type=int, default=None,
+        help=(
+            "Selections per matcher call (default: 12, the seed limit; "
+            "lower cuts decode time, the dominant cost on a local backend)"
+        ),
+    )
+    parser.add_argument(
         "--matcher-sidecar", default=None,
         help=(
             "Path to the compressed-meanings sidecar (default: "

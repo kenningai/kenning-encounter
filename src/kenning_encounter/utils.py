@@ -233,6 +233,14 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
     if mt is None:
         mt = _env_int("NEO4J_MATCHER_TIMEOUT_MS")
     config["matcher_timeout_ms"] = 5000 if mt is None else max(100, min(10_000, mt))
+    # Selections per matcher call. Output tokens dominate a warm call on a
+    # local backend (a field deployment measured decode at 82% of it), so
+    # this is the matcher's main latency lever. Ceiling = the seed limit:
+    # infuse keeps at most that many seeds, so more selections buy nothing.
+    tn = args.matcher_top_n
+    if tn is None:
+        tn = _env_int("NEO4J_MATCHER_TOP_N")
+    config["matcher_top_n"] = 12 if tn is None else max(1, min(12, tn))
     config["matcher_sidecar"] = (
         args.matcher_sidecar
         or os.getenv("NEO4J_MATCHER_SIDECAR")
@@ -242,8 +250,9 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
     # No stateless-HTTP option, by design (v0.3.0). Encounters within a session
     # are stateful by definition — they depend on the states that preceded them
     # (per-locus chaining, locus-scoped write targeting) — so HTTP sessions are
-    # always stateful: the server issues an Mcp-Session-Id (the locus key) and
-    # honors the DELETE session-teardown.
+    # always stateful: the server issues an Mcp-Session-Id (keying the
+    # write-target cache; the locus identity is the harness session id, held
+    # in the graph) and honors the DELETE session-teardown.
 
     return config
 

@@ -67,7 +67,7 @@ services:
 
   kenning_encounter:
     build: .
-    image: kenning-encounter:0.10.0
+    image: kenning-encounter:0.11.0
     container_name: kenning_encounter-mcp
     depends_on:
       neo4j:
@@ -110,6 +110,9 @@ services:
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       NEO4J_MATCHER_MODEL: "${NEO4J_MATCHER_MODEL:-gemini-3.5-flash-lite}"
       NEO4J_MATCHER_TIMEOUT_MS: "${NEO4J_MATCHER_TIMEOUT_MS:-5000}"
+      # Selections per call (max 12 = the seed limit). Output tokens are the
+      # dominant cost of a warm call, so this is the latency lever.
+      NEO4J_MATCHER_TOP_N: "${NEO4J_MATCHER_TOP_N:-12}"
       NEO4J_MATCHER_SIDECAR: "/app/models/meaning_sidecar.json"
     volumes:
       # The meaning sidecar lives INSIDE the stack, like neo4j_data — a

@@ -12,10 +12,8 @@ The gate's two load-bearing properties:
   1. It detects INTERACTIVE positively, so an unrecognised harness degrades
      toward SILENCE rather than toward drone.
   2. Every suppression is RECORDED. A guard that suppresses silently is
-     indistinguishable from a guard that is broken — this project has
-     shipped that failure three times (assembler ladder, phantom ledger,
-     permutation-invariant null), and the observation stream is where the
-     fourth gets caught.
+     indistinguishable from a guard that is broken, and the observation
+     stream is what tells them apart.
 """
 
 import importlib.util

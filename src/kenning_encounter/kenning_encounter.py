@@ -1,5 +1,6 @@
 import importlib.metadata
 import logging
+import re
 import time
 import uuid
 from enum import Enum
@@ -16,6 +17,7 @@ from .infuse import (
     format_progression,
     group_progressions,
     lucene_query,
+    matcher_fallback_note,
     progression_renewal,
     progression_terminus,
     renewal_filter_edges,
@@ -421,7 +423,7 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
             # SERVER lost state — and could strand an encounter for a reason
             # that had nothing to do with the agent.
             "t_sealed": str,
-            # RETIRED as of v0.12.0, kept because 12 encounters carry it and
+            # RETIRED as of v0.12.0, kept because encounters carry it and
             # nothing is deleted. It marked "the server discarded this
             # locus's state while the encounter was unsealed" — an event that
             # can no longer occur, since there is no locus state to discard.
@@ -645,6 +647,42 @@ RELATION_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 # -- Validation Functions -----------------------------------------------------
+
+# Tool-call markup that an LLM caller emits INTO a parameter's value when it
+# opens a second parameter block inside the first: the whole tail, including
+# what was meant as `report`, lands in `summary`. A field deployment found
+# this on 29% of its seals, recurring even while the model was documenting it.
+_SEAL_MARKUP = re.compile(
+    r"</parameter>|<parameter\s+name=|</invoke>|<invoke\s+name=|</?function_calls>"
+)
+_SEAL_LONG_SUMMARY = 600
+
+
+def validate_seal(summary: str | None, report: str | None) -> list[str]:
+    """Refuse a seal carrying tool-call markup; return advisory warnings.
+
+    REFUSE, not warn: a seal can never be rewritten (encounters are the
+    record, and nothing in a Kenning Encounter is deleted), so a damaged seal is damaged
+    forever while a refusal costs one retry. The warning is the softer case
+    that usually travels with it: an empty report beside a long summary.
+    """
+    for field, text in (("summary", summary), ("report", report)):
+        if text and _SEAL_MARKUP.search(text):
+            raise ValueError(
+                f"close_encounter refused: '{field}' contains tool-call markup "
+                "(a parameter or invoke tag), so a second parameter was written "
+                "inside this one's value. Nothing was sealed. Retry with summary "
+                "and report as separate parameters, each plain prose."
+            )
+    warnings: list[str] = []
+    if report is None and summary and len(summary) > _SEAL_LONG_SUMMARY:
+        warnings.append(
+            "report is empty while summary is long — if a report was intended, "
+            "it may have been folded into summary. The seal is written and "
+            "cannot be revised."
+        )
+    return warnings
+
 
 def validate_entity(node_type: str, properties: dict[str, Any]) -> dict[str, Any]:
     """Validate entity properties against the schema registry.
@@ -1211,14 +1249,10 @@ class Neo4jKenningEncounter:
         # SPINE HEALTH (v0.12.3), and it is here rather than only in the log
         # because THIS is what the reader reads.
         #
-        # v0.12.2 added a startup warning for an unmigrated spine and sent it
-        # to `docker logs`, which addresses an operator watching a container
-        # start. The harness this runs under is Claude Code, so the reader is
-        # an AGENT, and an agent sees tool returns — never a container log. A
-        # guard the reader cannot reach is not a guard, and that was the third
-        # instance in three releases of getting the reader wrong: content to
-        # the wrong destination (v0.11.2), no reader at all (v0.12.2), and a
-        # reader who could not get to it (this one).
+        # A startup warning in `docker logs` addresses an operator watching a
+        # container start. The harness this runs under is Claude Code, so the
+        # reader is an AGENT, and an agent sees tool returns — never a
+        # container log. A guard the reader cannot reach is not a guard.
         #
         # Re-entry is where it belongs: the agent reads this payload
         # constitutively, before examining anything, at the start of every
@@ -1226,9 +1260,9 @@ class Neo4jKenningEncounter:
         # told is the same thing as being able to fix it.
         #
         # PRESENT ONLY WHEN WRONG. A standing "spine: healthy" line would be
-        # noise on every re-entry, and worse, it is the reassuring shape this
-        # project keeps catching — the deferral summary prints nothing on an
-        # empty tally for the same reason.
+        # noise on every re-entry, and worse, it is a reassuring shape that
+        # reports nothing — the deferral summary prints nothing on an empty
+        # tally for the same reason.
         orphaned = await self._orphaned_encounter_count()
         if orphaned:
             payload["spine_unmigrated"] = {
@@ -1968,6 +2002,7 @@ class Neo4jKenningEncounter:
                 self._INFUSE_EXPANSION_BIAS if expansion_bias is None
                 else max(0.0, min(1.0, expansion_bias))
             ),
+            selection_note=matcher_fallback_note(selection_meta),
         )
         result["selection_channel"] = (
             "meaning" if seed_matches is not None else "lexical"
@@ -1988,6 +2023,7 @@ class Neo4jKenningEncounter:
         locus_key: str | None = None,
         refresh_turns: int = 10,
         expansion_bias: float = 0.5,
+        selection_note: str | None = None,
     ) -> dict[str, Any]:
         """The full governed payload: one biased rank blending focal and
         frontier seeds over an ephemeral coherence-only projection, divergence
@@ -2440,6 +2476,7 @@ class Neo4jKenningEncounter:
             max_chars=max_chars,
             standing_nodes=standing_nodes,
             progressions=prog_renders,
+            selection_note=selection_note,
         )
 
         # Delivery-gated ledger stamp (v0.7.1). Only bodies that actually
@@ -2598,6 +2635,7 @@ class Neo4jKenningEncounter:
         advance_encounter. After the seal, recording needs a new advance:
         the seal is what crystallized that encounter.
         """
+        warnings = validate_seal(summary, report)
         set_clauses = ["SET e.t_sealed = datetime()"]
         params: dict[str, Any] = {}
         if summary is not None:
@@ -2626,12 +2664,15 @@ class Neo4jKenningEncounter:
         if not result.records:
             raise ValueError(f"Encounter '{target['name']}' no longer exists.")
         r = result.records[0]
-        return {
+        sealed: dict[str, Any] = {
             "name": r["name"],
             "t_exist": _neo4j_datetime_to_str(r["t_exist"]),
             "summary": r["summary"],
             "report": r["report"],
         }
+        if warnings:
+            sealed["warnings"] = warnings
+        return sealed
 
     # RETIRED in v0.12.0: mark_open_dissolved / the idle-mark sweep.
     #
@@ -2641,7 +2682,7 @@ class Neo4jKenningEncounter:
     # the open encounter is a graph read. The mark was always mechanical
     # rather than existential (it recorded that the SERVER forgot, not that
     # an existence ended), and it fired at least once on a locus that was
-    # still alive to return. Nothing computes it now; the 12 encounters
+    # still alive to return. Nothing computes it now; the encounters
     # carrying it keep it, as the record of an era.
 
     async def create_entities(

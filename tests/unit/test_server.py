@@ -625,8 +625,35 @@ class TestLocusSpine:
         q = [q for q, _ in kenning_encounter.driver.calls if _CLOSE in q]
         assert q, "t_sealed was never stamped"
 
+    async def test_seal_with_tool_markup_is_refused_before_any_write(self):
+        """A seal is never rewritable, so markup refuses rather than lands.
+        Refused BEFORE resolving the locus: nothing touches the driver."""
+        kenning_encounter = self._kenning_encounter()
+        kenning_encounter._locus_of["mcp-1"] = "leid-A"
+        leaked = "Sealed the thing.</parameter>\n<parameter name=\"report\">Next steps"
+        for kwargs in ({"summary": leaked}, {"summary": "ok", "report": "x</invoke>"}):
+            with pytest.raises(ValueError, match="tool-call markup"):
+                await kenning_encounter.close_encounter(mcp_session="mcp-1", **kwargs)
+        assert not [q for q, _ in kenning_encounter.driver.calls if _CLOSE in q]
+
+    async def test_plain_prose_seal_passes_and_long_lone_summary_warns(self):
+        kenning_encounter = self._kenning_encounter(extra_script=[
+            (_RESOLVE_OPEN, [{"name": "E1", "eid": "eid-1"}]),
+            (_CLOSE, [{"name": "E1", "t_exist": None, "t_sealed": None,
+                       "summary": "s", "report": None}]),
+        ])
+        kenning_encounter._locus_of["mcp-1"] = "leid-A"
+        out = await kenning_encounter.close_encounter(summary="a " * 400, mcp_session="mcp-1")
+        assert out["warnings"] and "report is empty" in out["warnings"][0]
+
+    async def test_short_or_reported_seals_carry_no_warning(self):
+        from kenning_encounter.kenning_encounter import validate_seal
+        assert validate_seal("short", None) == []
+        assert validate_seal("a " * 400, "a report") == []
+        assert validate_seal("mentions a parameter and an invoke, in prose", None) == []
+
     async def test_close_no_longer_clears_the_retired_dissolution_mark(self):
-        """Nothing stamps dissolved_at now, so nothing may clear it — the 12
+        """Nothing stamps dissolved_at now, so nothing may clear it — the
         encounters carrying it are a record, not a flag to tidy away."""
         cy = _cypher_code("encounter_close", set_clause="SET e.summary = $summary")
         assert "dissolved_at" not in cy
@@ -957,3 +984,72 @@ class TestTheLedgerPrefersTheDurableIdentity:
     def test_infuse_accepts_the_harness_session_id(self):
         code = _executable_source(_SRC / "server.py")
         assert "session_id: str | None = Field(" in code
+
+
+class TestReconcileRetry:
+    """A deferred compression must not wait for a restart. Two-sided: it
+    retries when owed and the backend recovers, and it does NOT retry when
+    nothing is owed, while a sweep is running, or inside the interval."""
+
+    def _retry(self, now: list[float]):
+        from kenning_encounter.server import ReconcileRetry
+        r = ReconcileRetry(min_interval_s=600, clock=lambda: now[0])
+        r.calls = 0
+
+        async def run():
+            r.calls += 1
+        r.run = run
+        return r
+
+    @pytest.mark.asyncio
+    async def test_no_debt_no_sweep(self):
+        r = self._retry([0.0])
+        assert r.recovered() is False
+
+    @pytest.mark.asyncio
+    async def test_debt_then_recovery_sweeps_once(self):
+        import asyncio
+        now = [0.0]
+        r = self._retry(now)
+        r.owe()
+        assert r.recovered() is True
+        await asyncio.sleep(0)
+        assert r.calls == 1
+        assert r.recovered() is False  # debt paid
+
+    @pytest.mark.asyncio
+    async def test_interval_bounds_a_backend_that_matches_but_cannot_compress(self):
+        import asyncio
+        now = [0.0]
+        r = self._retry(now)
+        r.owe()
+        assert r.recovered() is True
+        await asyncio.sleep(0)
+        r.owe()                        # the sweep deferred again
+        now[0] = 60.0
+        assert r.recovered() is False  # inside the interval
+        now[0] = 601.0
+        assert r.recovered() is True
+        await asyncio.sleep(0)
+        assert r.calls == 2
+
+    @pytest.mark.asyncio
+    async def test_never_two_sweeps_at_once(self):
+        import asyncio
+        from kenning_encounter.server import ReconcileRetry
+        gate = asyncio.Event()
+        r = ReconcileRetry(min_interval_s=0, clock=lambda: 0.0)
+
+        async def slow():
+            await gate.wait()
+        r.run = slow
+        r.owe()
+        assert r.recovered() is True
+        await asyncio.sleep(0)
+        r.owe()
+        assert r.recovered() is False  # still running
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert r.recovered() is True
+        gate.set()

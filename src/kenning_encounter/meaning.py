@@ -296,10 +296,19 @@ class MeaningIndex:
 
 
 def build_prefix(nodes: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
-    """The static meanings block. Sorted by name so numbering — and
-    therefore the cacheable prefix — is deterministic for a given sidecar;
-    a sidecar refresh renumbers, costing exactly one cache miss."""
-    ordered = sorted(nodes)
+    """The static meanings block, numbered in the sidecar's INSERTION order.
+
+    Insertion order, not name order, because the prefix is a cache key.
+    `upsert` appends a new node and edits an existing one in place, so a
+    write leaves every line before it byte-identical: appending costs only
+    the delta, and an edit invalidates from that node's position onward.
+    Sorting by name renumbered nearly the whole block on any write whose
+    name sorted early — a total cache miss per write, which on a local
+    backend is a full cold prefill (a field deployment measured 634s at
+    ~760 nodes). Deterministic for a given sidecar file either way; the
+    numbering never leaves the call (parse_matcher_output maps it back
+    through ordered_names)."""
+    ordered = list(nodes)
     lines = [MATCHER_HEADER]
     for i, name in enumerate(ordered, 1):
         meaning = " ".join(str(nodes[name].get("meaning", "")).split())
@@ -501,7 +510,7 @@ async def match_meanings(
     order's own definition; request them only at small top_n."""
     if not api_key or not model:
         raise MeaningUnavailable(
-            "matcher not configured (GEMINI_API_KEY / NEO4J_LIFTER_MODEL)"
+            "matcher not configured (GEMINI_API_KEY / NEO4J_MATCHER_MODEL)"
         )
     try:
         import httpx
