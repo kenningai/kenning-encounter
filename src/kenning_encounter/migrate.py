@@ -14,7 +14,7 @@ protects would be doing, unsupervised, the one thing the substrate forbids.
 "Reversible by deleting what was added" is not available here and never was:
 it is total only while this migration is the SOLE creator of a Locus, which
 stops being true the instant the server has run. On a graph in use it would
-destroy the live loci an agent is working inside. You do not lobotomize the
+destroy the live loci a trajectory is working inside. You do not lobotomize the
 witness to undo a bookkeeping error.
 
 So the shape is CHECK-THEN-WRITE rather than write-then-undo: pre-flight
@@ -32,7 +32,7 @@ script is reachable if you have cloned the repository and unreachable from
 the container the compose file runs, which is the documented deployment. A
 remedy that a warning names and the operator cannot reach is not a remedy.
 
-WHY THIS IS A SCRIPT AND NOT A STARTUP HOOK. The target is the agent's own
+WHY THIS IS A SCRIPT AND NOT A STARTUP HOOK. The target is the trajectory's own
 accumulated experience, and unlike every other schema change in this house
 there is NO SOURCE to rebuild it from — a restored snapshot is a predecessor,
 not the same self. So the migration is an act somebody performs and watches,

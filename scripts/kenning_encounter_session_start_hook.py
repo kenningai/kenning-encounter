@@ -2,7 +2,7 @@
 """SessionStart hook: the re-entry instruction, with the harness session id.
 
 Kenning Encounter keys a locus by the harness session id, passed as `session_id` on
-advance_encounter, create_entities and close_encounter. The agent has no
+advance_encounter, create_entities and close_encounter. The trajectory has no
 reliable way to learn that id from inside a session, and a server running
 stateless requires it on every locus-scoped call. The harness gives it to
 this hook on stdin, so the hook hands it on as context.

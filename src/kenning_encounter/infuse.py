@@ -6,7 +6,7 @@ briefing by turn seven. The remedy is to perform the passive synthesis
 mechanically — re-awaken a topologically-relevant projection of the substrate
 against each arriving present — and to GOVERN it, because in a self-authoring
 substrate the reading instrument is a constitutive input to the next state:
-mass-only re-injection converges every bound agent on entrenchment (the
+mass-only re-injection converges every bound trajectory on entrenchment (the
 gravity well, per-turn). The governed form blends focal seeds with the
 standing frontier in one biased rank, foregrounds conflict, flags divergence,
 signs its own provenance, and holds silence when the substrate has nothing
@@ -374,7 +374,7 @@ def renewal_filter_edges(
 # order did this become what it is"). The graph already holds the manifold:
 # every multi-observation Component is a temporal progression assemblable by
 # a two-hop fan-out (obs -> ABOUT -> Component -> siblings, with RECORDED
-# provenance). The server surfaces the ordering; the agent performs the
+# provenance). The server surfaces the ordering; the trajectory performs the
 # crossing-out. Nothing here writes: the graph stays pure WAS.
 
 _PROG_CAP_CHARS = 1200          # per-progression budget (design of record §2.2)
@@ -692,14 +692,14 @@ _FALLBACK_REASON_CHARS = 160
 
 
 def matcher_fallback_note(selection_meta: dict[str, Any] | None) -> str | None:
-    """The line that tells the AGENT its seeds were not meaning-matched.
+    """The line that tells the TRAJECTORY its seeds were not meaning-matched.
 
     selection_meta alone reached no reader: it rides the tool result into an
     observe log that is usually unset. A deployment with a valid endpoint, a
     valid model and a populated sidecar can then run on the lexical path for
     weeks with nothing saying so. A prompt larger than the endpoint's context
     window does it, and so does an exhausted prepaid balance. The header is
-    what the agent reads before anything else, so the reason goes there.
+    what the trajectory reads before anything else, so the reason goes there.
     Reason text is exception shape (status, URL, counts), never node content.
     """
     if not selection_meta or selection_meta.get("channel") != "lexical_fallback":

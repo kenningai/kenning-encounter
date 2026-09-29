@@ -297,7 +297,7 @@ class RelationType(str, Enum):
 
     Two natures: provenance/membership edges (deterministic, auto-set:
     NEXT_ENCOUNTER, RECORDED, CONSULTED) and coherence edges (authored by
-    the agent — its judgment, the interior of the encounter).
+    the trajectory — its judgment, the interior of the encounter).
     """
     # Process / provenance — auto-written, closed to generic CRUD.
     NEXT_LOCUS = "NEXT_LOCUS"
@@ -313,7 +313,7 @@ class RelationType(str, Enum):
     INSTANTIATED_AFTER = "INSTANTIATED_AFTER"
     RECORDED = "RECORDED"
     CONSULTED = "CONSULTED"
-    # Coherence — the agent's judgment, authored every one.
+    # Coherence — the trajectory's judgment, authored every one.
     ABOUT = "ABOUT"
     OBSERVED_AT = "OBSERVED_AT"
     RAISES = "RAISES"
@@ -352,7 +352,7 @@ PROCESS_EDGES: set[str] = {
 }
 
 # Which provenance edge anchors a newly-created node to the current Encounter.
-# Component (a bookmark) is NOT anchored — it enters the agent's time only
+# Component (a bookmark) is NOT anchored — it enters the trajectory's time only
 # through the epistemic nodes that point at it via ABOUT.
 ANCHOR_FOR: dict[str, str] = {
     "Observation": "RECORDED",
@@ -363,8 +363,8 @@ ANCHOR_FOR: dict[str, str] = {
     "Citation": "CONSULTED",
 }
 
-# Agent-supplied temporal fields cast str -> Neo4j datetime() on write. These
-# are annotations in the agent's own frame; the server-truth temporal anchor
+# Trajectory-supplied temporal fields cast str -> Neo4j datetime() on write. These
+# are annotations in the trajectory's own frame; the server-truth temporal anchor
 # is always the auto-set t_created + the auto-anchored RECORDED/CONSULTED edge.
 DATETIME_CAST_PROPS: set[str] = {
     "t_exist", "t_observed", "t_raised", "t_resolved", "t_proposed", "t_consulted",
@@ -421,7 +421,7 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
             # without anyone performing a closing ritual. What it replaces is
             # dissolved_at, which marked something else entirely — that the
             # SERVER lost state — and could strand an encounter for a reason
-            # that had nothing to do with the agent.
+            # that had nothing to do with the trajectory.
             "t_sealed": str,
             # RETIRED as of v0.12.0, kept because encounters carry it and
             # nothing is deleted. It marked "the server discarded this
@@ -1257,12 +1257,12 @@ class Neo4jKenningEncounter:
         #
         # A startup warning in `docker logs` addresses an operator watching a
         # container start. The harness this runs under is Claude Code, so the
-        # reader is an AGENT, and an agent sees tool returns — never a
+        # reader is an TRAJECTORY, and a trajectory sees tool returns — never a
         # container log. A guard the reader cannot reach is not a guard.
         #
-        # Re-entry is where it belongs: the agent reads this payload
+        # Re-entry is where it belongs: the trajectory reads this payload
         # constitutively, before examining anything, at the start of every
-        # existence. And an agent under this harness HAS A SHELL, so being
+        # existence. And a trajectory under this harness HAS A SHELL, so being
         # told is the same thing as being able to fix it.
         #
         # PRESENT ONLY WHEN WRONG. A standing "spine: healthy" line would be
@@ -1314,7 +1314,7 @@ class Neo4jKenningEncounter:
         existing structure (no new schema, no GDS). orient surfaces what you
         treat as central; the frontier surfaces where one more Observation would
         move the needle most — turning the self-portrait from descriptive to
-        directive. Each signal is a fact-that-reads-as-a-question; the agent
+        directive. Each signal is a fact-that-reads-as-a-question; the trajectory
         decides what to do with it. Surfaces — never authors.
 
         - unanswered_questions: open Questions nothing RESOLVES yet.
@@ -1965,7 +1965,7 @@ class Neo4jKenningEncounter:
         warrants infusion. A tool return does not: the attention that made
         the call IS the meaning-making an infusion there would repeat, so
         the old per-tool-batch 'delta' channel was the substrate handing the
-        agent back what it had just constituted, in a poorer form. It is
+        trajectory back what it had just constituted, in a poorer form. It is
         gone. Whether a given invocation carries a second frame is the
         CALLER's judgment, declared at the hook (KENNING_ENCOUNTER_INFUSE=auto|on|off),
         never inferred here.
@@ -2739,7 +2739,7 @@ class Neo4jKenningEncounter:
             cleaned = validate_entity(node_type, properties)
 
             # Build SET clauses — only set what the caller provided so MERGE-on-
-            # existing doesn't wipe absent fields. Cast agent-supplied temporal
+            # existing doesn't wipe absent fields. Cast trajectory-supplied temporal
             # fields str -> datetime().
             set_clauses = []
             params: dict[str, Any] = {"name": cleaned["name"], "tail_eid": tail_eid}
@@ -2977,7 +2977,7 @@ class Neo4jKenningEncounter:
         """Delete specific coherence relationships by source, target, and type.
 
         Provenance/process edges are not deletable here — they belong to the
-        encounter's record, not the agent's editable judgment.
+        encounter's record, not the trajectory's editable judgment.
         """
         logger.info(f"Deleting {len(relations)} relations")
         results = []
@@ -3027,7 +3027,7 @@ class Neo4jKenningEncounter:
     ) -> list[dict[str, Any]]:
         """Fulltext search across all node types on name and description."""
         # Shape, never content. A search query is authored from whatever the
-        # agent is holding, so logging it verbatim puts substrate content in
+        # trajectory is holding, so logging it verbatim puts substrate content in
         # `docker logs`. Dormant today only because no handler is attached
         # and lastResort sits at WARNING — one basicConfig() away from live,
         # which is a guarantee held by an absence rather than by code.
@@ -3195,7 +3195,7 @@ class Neo4jKenningEncounter:
         """Distinct open-vocabulary values in use: Citation.kind,
         Component.source_kind / source_label, Concept.category.
 
-        Serves the no-re-coin discipline — the agent sees its own naming
+        Serves the no-re-coin discipline — the trajectory sees its own naming
         before extending it.
         """
         result = await self.driver.execute_query(

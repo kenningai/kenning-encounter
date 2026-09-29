@@ -10,7 +10,7 @@ problem — and writes models/meaning_sidecar.json.
 Idempotent by content hash: unchanged nodes keep their meaning, new or
 edited nodes recompute, departed nodes drop. Nothing is ever written to
 Neo4j, and the sidecar never enters node properties — the graph stays
-authored by the agent alone (the settled constraint).
+authored by the trajectory alone (the settled constraint).
 
 NOTE (v0.9.0): in a deployed stack this script is a DEV/OFFLINE tool, not
 an operational step. The sidecar lives in the stack's named volume and the

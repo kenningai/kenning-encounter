@@ -3,7 +3,7 @@
   HOWTO: Using kenning-encounter correctly.
 
   This document is for you — the LLM operating these tools. Not for a human
-  developer. For the agent that will open sessions, record what it learns, and
+  developer. For the trajectory that will open sessions, record what it learns, and
   build up, across many separate runs, a structured working memory of whatever
   subject it is studying.
 
@@ -50,13 +50,16 @@
     last worked on and what's still open. The wall-clock gap between Encounters
     is irrelevant — Encounter N → N+1 is the unit of order.
 
-    The chain is PER-SESSION. Your session's encounters form one fork-free
-    path; a concurrent session (another agent run over the same memory) grows
-    its own path, and your writes can never land in its encounters nor its in
-    yours. Your session's first encounter is anchored by INSTANTIATED_AFTER to
-    whichever encounter was latest when your session began — writes are
-    serialized, so that order is exact — which keeps the whole spine one
-    connected, temporally ordered structure across all sessions.
+    The chain is PER-SESSION. A Locus is one session of you, keyed by the
+    harness session id you pass as session_id. Your session's encounters form
+    one fork-free path (NEXT_ENCOUNTER) that never crosses into another; a
+    concurrent session (the same trajectory open elsewhere at once) grows its
+    own path, and your writes can never land in its encounters nor its in
+    yours. OPENED ties each encounter to exactly one session, and NEXT_LOCUS
+    orders sessions by when they began: sessions overlap, but their starts are
+    serialized writes, so that order is exact. Two encounters in different
+    sessions are not ordered against each other, because no one lived across
+    both; do not reach for the wall clock to invent an order.
   </principle>
 
   <principle name="use-the-analytics-to-see-the-shape">
@@ -81,7 +84,7 @@
     returns the FRONTIER — where your memory is thinnest: unanswered Questions,
     untested Hypotheses, ungrounded Concepts, confidence that outruns its evidence.
     It also returns the UNSEALED set — encounters no one sealed, with last
-    activity and any dissolved_at mark; awareness, not a work queue.
+    activity and the session that opened them; awareness, not a work queue.
     The mass readings say what you've made central; the frontier says where to
     look next. Reach for the single gds_* tools for focused questions once you're
     oriented — scoping your own projection is how you formulate the question.
@@ -180,16 +183,17 @@
 
 <encounter-cycle>
   <step order="1" action="open-and-orient">
-    Open with advance_encounter — no predecessor; the server links from the
-    encounter YOUR session last opened (your session's first becomes a new
-    branch, anchored by INSTANTIATED_AFTER to the then-latest encounter). It
-    hands you the RE-ENTRY PAYLOAD: your predecessor and genesis_anchor, recent
-    sessions, still-open Questions, live Hypotheses, recently-touched Concepts,
+    Open with advance_encounter, passing session_id (your harness session id;
+    the SessionStart hook hands it to you) and no predecessor: the server finds
+    your session's latest encounter in the graph and links from it. A session's
+    first encounter starts that session's path, and NEXT_LOCUS places the
+    session among the others. It hands you the RE-ENTRY PAYLOAD: your
+    predecessor, your session and whether it is anonymous, recent sessions, still-open Questions, live Hypotheses, recently-touched Concepts,
     the COHERENCE EDGES among them (so a Question arrives with what RAISES it
     and whether anything RESOLVES it — read the edges, not just the nodes; that
     is where the structure lives), and the UNSEALED set: every encounter with
-    no seal, annotated with last activity and any dissolved_at mark. An
-    unsealed encounter is either a concurrent session still working or one that
+    no seal, annotated with last activity, the session that opened it, and
+    whether that session is anonymous. An unsealed encounter is either a concurrent session still working or one that
     ended without sealing — the graph cannot tell which, so treat the list as
     awareness, not a work queue: never record into one, never seal one for its
     author; always open your own. Read the payload before you examine the
@@ -215,9 +219,8 @@
     session's. Even a no-change run gets a close — confirming that nothing
     changed is itself a recordable event. Sealing is what makes the Encounter
     durable; if a run ends before you seal, that Encounter stays in the
-    unsealed set, and if the server discards your session's state it gets a
-    mechanical dissolved_at timestamp — never an auto-written summary; only
-    the session that lived an encounter may author its seal. Seal while you
+    unsealed set, and nothing writes a summary for it; only the session that
+    lived an encounter may author its seal. Seal while you
     still can.
   </step>
   <invariant name="advance-first">
@@ -240,7 +243,8 @@
 <node-types>
   <preamble>Eight types across three layers. The Neo4j label IS the type — never put a 'type' property on a node. Use list_node_types for the live schema.</preamble>
 
-  <type name="Encounter">One sealed unit of work. The temporal spine is built from these: NEXT_ENCOUNTER chains your session's encounters (fork-free), INSTANTIATED_AFTER anchors each session's first encounter into the whole. Written only by advance_encounter / close_encounter — never via create_entities — and NEVER deletable: delete_entities refuses Encounters, because the spine is the record of what happened, not editable content.</type>
+  <type name="Locus">One session of you, keyed by the harness session id you pass as session_id; minted by that session's first advance_encounter, never by connecting. Without a session_id it is anonymous: it works, but no later session can rejoin it. Written only by advance_encounter, and never deletable.</type>
+  <type name="Encounter">One sealed unit of work. The temporal spine is built from these: NEXT_ENCOUNTER chains your session's encounters (fork-free), OPENED ties each to the session (Locus) that opened it, and NEXT_LOCUS orders sessions by when they began. Written only by advance_encounter / close_encounter — never via create_entities — and NEVER deletable: delete_entities refuses Encounters, because the spine is the record of what happened, not editable content.</type>
 
   <type name="Observation">"I examined X and noticed Y." Required: name, description, t_observed. Every Observation needs a Citation — draw OBSERVED_AT to it. No floating claims: if you can't point to where you read it, you didn't observe it.</type>
   <type name="Question">"I don't understand why Z." status: open / answered / abandoned. An open Question is a goal, not a failure — and one that persists across sessions is signal.</type>
@@ -256,7 +260,7 @@
   <preamble>Two natures, opposite rules. Use list_relation_types for the live constraints; the server enforces direction.</preamble>
 
   <nature name="provenance" written="automatically">
-    NEXT_ENCOUNTER, INSTANTIATED_AFTER, RECORDED, CONSULTED. Membership and
+    NEXT_LOCUS, OPENED, NEXT_ENCOUNTER, RECORDED, CONSULTED. Membership and
     order — which session a node came to be within, which encounter succeeded
     which in your session, where your session began relative to the rest.
     Auto-set, like t_created. You cannot author or delete them.
@@ -288,7 +292,7 @@
   <error name="re-coined-source-kind">Three spellings of one source fracture your vocabulary. Fix: call list_vocabulary before coining a token; reuse what exists.</error>
   <error name="orphan-notes">Notes that never crystallize. Fix: each session, crystallize or retire your drafts; run WCC to find the ones you left behind.</error>
   <error name="forgetting-to-open-or-close">Recording without advance_encounter (refused — "no open Encounter" means YOUR session's), or finishing without close_encounter (the Encounter dangles in the unsealed set). Fix: open every run, close every Encounter — open fresh, write, seal, no dangling.</error>
-  <error name="sealing-someone-elses-session">The unsealed set shows another session's open encounter and you tidy it — record into it, or seal it with a summary you compose. Fix: don't. Only the session that lived an encounter can summarize it honestly; an unsealed encounter from a crashed run stays unsealed, and that missing summary is accurate. The dissolved_at timestamp is the only mark the system leaves.</error>
+  <error name="sealing-someone-elses-session">The unsealed set shows another session's open encounter and you tidy it — record into it, or seal it with a summary you compose. Fix: don't. Only the session that lived an encounter can summarize it honestly; an unsealed encounter from a crashed run stays unsealed, and that missing summary is accurate. The missing seal is the only mark, and it is the honest one.</error>
   <error name="treating-the-infused-frontier-as-your-wondering">Infused payloads show your open threads every prompt, and you never author a new Question because the display feels like asking. Fix: the displayed frontier is recall of questions already held; when examination surfaces something genuinely unresolved, write the Question node. The session that is shown five questions per prompt and records none is the cautionary case.</error>
 </common-errors>
 

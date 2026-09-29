@@ -67,7 +67,7 @@ services:
 
   kenning_encounter:
     build: .
-    image: kenning-encounter:0.12.0
+    image: kenning-encounter:0.12.1
     container_name: kenning_encounter-mcp
     depends_on:
       neo4j:

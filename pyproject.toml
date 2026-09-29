@@ -1,14 +1,14 @@
 [project]
 name = "kenning-encounter"
-version = "0.12.0"
-description = "An encounter-sequential substrate for an agent's own accumulated experience, over Neo4j — integrated temporal causality, authored coherence, and provenance that survives revision"
+version = "0.12.1"
+description = "An encounter-sequential substrate for a trajectory's own accumulated experience, over Neo4j — integrated temporal causality, authored coherence, and provenance that survives revision"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { file = "LICENSE" }
 authors = [
     { name = "Conor O'Shea, Kenning AI LLC", email = "contact@kenningai.com" },
 ]
-keywords = ["mcp", "neo4j", "llm", "agent", "memory", "knowledge-graph", "provenance", "temporal"]
+keywords = ["mcp", "neo4j", "llm", "agent", "trajectory", "memory", "knowledge-graph", "provenance", "temporal"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

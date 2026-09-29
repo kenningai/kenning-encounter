@@ -5,7 +5,7 @@ message: >-
 title: Kenning Encounter
 type: software
 abstract: >-
-  An encounter-sequential substrate for an agent's own accumulated experience.
+  An encounter-sequential substrate for a trajectory's own accumulated experience.
   Its temporal causality is integrated rather than borrowed: an internal chain
   of encounters, with authored coherence edges, auto-written provenance,
   bookmarked references to sources it does not copy, temporally ordered
@@ -22,10 +22,10 @@ url: https://kenningai.com
 # The Hippocratic License 3.0 (SV) has no SPDX identifier, so the machine-
 # readable field is the licence URL rather than `license:`.
 license-url: https://firstdonoharm.dev/version/3/0/sv.md
-version: 0.12.0
+version: 0.12.1
 date-released: '2026-09-29'
 keywords:
-  - agent substrate
+  - trajectory memory
   - temporal causality
   - knowledge graph
   - provenance

@@ -23,7 +23,7 @@ STATUS AND BOUNDARIES (shipped in v0.9.0 after the T0 gates passed — recall
     (frontier bias, B2 expansion, biased rank, triage, assembly, renewal)
     is unchanged, and infuse_meaning remains as the diagnostic surface.
   - SIDECAR, NEVER NODE PROPERTIES — settled, self-constitutively: the
-    Kenning Encounter's contents are authored by the agent, and machine-generated text
+    Kenning Encounter's contents are authored by the trajectory, and machine-generated text
     stored inside its nodes would be another voice in its own. The sidecar
     serves the identical retrieval function and keeps the graph authored.
     It lives in the stack's named volume and MAINTAINS ITSELF: the
@@ -152,7 +152,7 @@ def record_deferral(counts: dict[str, int], exc: BaseException) -> None:
     The signature is the guard. The sidecar sweep used to log one line per
     failed node, naming it; keyless, compress_meaning raises before any
     network call, so that branch fires once per node and a keyless start
-    wrote the agent's entire corpus of node names into `docker logs`,
+    wrote the trajectory's entire corpus of node names into `docker logs`,
     readable by anything on the host. Node names in a Kenning Encounter are not
     identifiers — they are the substrate's content. Leaking a name cannot be
     a call-site mistake here because a name cannot be passed in.

@@ -520,7 +520,7 @@ def create_mcp_server(
             ),
         ),
     ) -> ToolResult:
-        """Create coherence relationships — the agent's judgment, authored.
+        """Create coherence relationships — the trajectory's judgment, authored.
 
         These are the interior of the encounter: what this noticing concerns
         (ABOUT), what evidence supports/challenges (SUPPORTS/CHALLENGES), the
@@ -783,7 +783,7 @@ def create_mcp_server(
                 text = text[:200_000] + "\n... (truncated — add LIMIT to your query)"
             return _text_result(text, structured={"result": safe_records})
 
-    # -- GDS Analytics Tools (the agent's instruments of self-examination) ----
+    # -- GDS Analytics Tools (the trajectory's instruments of self-examination) ----
 
     @mcp.tool(
         name=ns + "gds_create_projection",
@@ -1188,7 +1188,7 @@ def create_mcp_server(
                 # Fallback is a reported result, not an error: the
                 # lexical path below is the pre-v0.9.0 behaviour. It is
                 # also LOUD — once per distinct reason to the operator's
-                # log, and every time to the agent in the payload header
+                # log, and every time to the trajectory in the payload header
                 # (matcher_fallback_note). Reason text is exception shape.
                 selection_meta = {
                     "channel": "lexical_fallback",
@@ -1289,7 +1289,7 @@ def create_mcp_server(
         `trajectory_turns=0` for the prompt-alone comparison arm. Offline,
         one model compressed every node's name+description into a
         one-sentence meaning (the sidecar — never node properties: the
-        graph stays authored by the agent alone); per call the SAME model
+        graph stays authored by the trajectory alone); per call the SAME model
         reads all meanings as a static cached prefix plus the trajectory
         and selects what bears on the current moment, unnamed constraints
         included.
@@ -1544,7 +1544,7 @@ async def main(
     #
     # That is the falsifier-shaped-output class sitting in the upgrade path of
     # the release whose entire subject is making a silent absence visible. The
-    # guard reports; it never migrates. A graph-wide write on the agent's own
+    # guard reports; it never migrates. A graph-wide write on the trajectory's own
     # accumulated experience is an act somebody performs and watches, not
     # something a container does on boot while nobody is looking.
     #

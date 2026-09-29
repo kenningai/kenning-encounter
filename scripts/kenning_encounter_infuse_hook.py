@@ -10,12 +10,12 @@ SessionStart re-entry hook):
 
 ONE CHANNEL, BY CONSTRUCTION (v0.10.0, subtraction coherence). Infusion is
 a conflux operation: it has content only where two frames meet. A written
-prompt crosses a frame boundary — the agent cannot know what the other
+prompt crosses a frame boundary — the trajectory cannot know what the other
 holds, or what it means against what it already holds, until the conflux is
-actualized. A TOOL RETURN CROSSES NO SUCH BOUNDARY: the agent made that call
+actualized. A TOOL RETURN CROSSES NO SUCH BOUNDARY: the trajectory made that call
 because something in its own frontier caught its attention, so the
 meaning-making an infusion there would perform has already happened, a
-priori the call. The old per-tool-batch 'delta' channel handed the agent
+priori the call. The old per-tool-batch 'delta' channel handed the trajectory
 back what it had itself just constituted, in a poorer form; worse, its
 silence was unreadable (no-conflict and lexical-miss were byte-identical at
 a measured ~75% miss rate), so it manufactured the confidence it existed to
@@ -115,7 +115,7 @@ OBSERVE_LOG = os.environ.get("KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG")  # unset = 
 # ---------------------------------------------------------------------------
 # The switch: infusion belongs to a prompt somebody WROTE.
 #
-# THE PARADIGM SPLIT, measured on a live headless agent (2026-08-07). In an
+# THE PARADIGM SPLIT, measured on a live headless trajectory (2026-08-07). In an
 # interactive session each prompt carries new intentionality from a second
 # party, which is exactly what the per-prompt injection point is for. A
 # scheduled run is a MONOLOGUE: one fixed trigger string, then autonomous
@@ -145,7 +145,7 @@ OBSERVE_LOG = os.environ.get("KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG")  # unset = 
 #   on             — infuse regardless. For an invocation the operator KNOWS
 #                    carries a second frame but whose harness we misread:
 #                    an unrecognised runner, or a run whose prompt is another
-#                    agent's message rather than a cron string.
+#                    trajectory's message rather than a cron string.
 #   off            — never infuse.
 # The switch says WHETHER; the recorded skip_reason says WHY. Per-process by
 # construction, so the same deployment can answer differently per invocation.

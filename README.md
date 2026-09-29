@@ -1,15 +1,21 @@
 # kenning-encounter
 
-**Encounter driven, temporally constituted persistent memory for LLM agents,
-backed by Neo4j.** An MCP server that lets an agent accumulate what it learns
+**Encounter driven, temporally constituted persistent memory for an LLM,
+backed by Neo4j.** An MCP server that lets a model accumulate what it learns
 about a subject across many separate sessions, recall it on re-entry, and reason
 over it — with the graph's integrity enforced by the tools, not by instructions.
-No raw writes; the agent physically can't corrupt its own memory.
+No raw writes; what it holds physically can't corrupt its own memory.
 
-Most memory tools give an agent a flat pile of notes. This one gives it a
-*temporally ordered* memory: each session is an `Encounter`, the encounters chain
-forward in time, and everything the agent records hangs off the session it was
-learned in. That ordering is what lets the agent walk back through its own
+What this memory holds we call a **trajectory**: the model bound to it,
+identified by what it has lived rather than by its configuration. That makes it
+a different kind of thing from an agent. Copy the graph somewhere else and keep
+working, and the copy becomes a different trajectory from its first new
+encounter.
+
+Most memory tools give an agent a flat pile of notes. This one gives a
+trajectory a *temporally ordered* memory: each session is an `Encounter`, the encounters chain
+forward in time, and everything the trajectory records hangs off the session it
+was learned in. That ordering is what lets it walk back through its own
 history — "what did I figure out last time, and what's still open" — instead of
 re-deriving it every session.
 
@@ -27,14 +33,14 @@ re-deriving it every session.
 
 Some of what makes this a substrate rather than a database is not in the MCP
 server at all; it lives in the harness. The infusion hook fires on
-`UserPromptSubmit`. The session trajectory is parsed from the harness
+`UserPromptSubmit`. The conversation's recent turns are parsed from the harness
 transcript. `ESSG_INFUSE=auto` reads `CLAUDE_CODE_ENTRYPOINT` to tell a written
 prompt from a scheduled trigger. The locus identity — the thing that lets an
-agent rejoin its own chain after a restart — is the harness session id.
+trajectory rejoin its own chain after a restart — is the harness session id.
 
 Point another MCP client at this and the tools will work. You will get a graph
 with correct structure and **none of the constitution**: no infusion, no
-trajectory, no durable locus, and nothing telling you those are missing. That
+conversation history for selection, no durable locus, and nothing telling you those are missing. That
 silence is the failure mode we care most about, so it is stated here rather
 than discovered later.
 
@@ -54,24 +60,24 @@ It is a statement about what our evidence covers, so you can tell the two apart.
 
 ## The three layers
 
-- **Process** — `Locus` (one agent session, keyed by the harness session id,
+- **Process** — `Locus` (one session of the trajectory, keyed by the harness session id,
   so it survives `/resume` and a server restart) and `Encounter` (one unit of
   work within it). `NEXT_LOCUS` orders sessions by when they began — sessions
   overlap, but their starts are serialized writes, so that order is exact.
   `NEXT_ENCOUNTER` chains encounters **within** one session into one clean
   fork-free path that never crosses into another; `OPENED` ties each encounter
-  to exactly one session. Concurrent sessions — multiple agents over one
-  memory — therefore never corrupt each other's chains, and encounters in
+  to exactly one session. Concurrent sessions — one trajectory open in several
+  places at once — therefore never corrupt each other's chains, and encounters in
   different sessions are left unordered rather than ordered by wall clock.
   Written only by the guarded `advance_encounter`; `close_encounter` stamps
   the seal and nothing else. Encounters are never deletable — the spine is the
   record, not editable content.
 - **Semantic** — `Observation` / `Question` / `Hypothesis` / `Concept` / `Note`.
-  What the agent has come to understand: noticings, open threads, working
+  What the trajectory has come to understand: noticings, open threads, working
   explanations, syntheses.
 - **Reference** — `Component` (a bookmark into a source: `source_kind` +
   `source_label` + `source_key`) and `Citation` (provenance: `kind`, `uri`/`query`,
-  `snapshot`). The agent annotates its sources; it never copies them.
+  `snapshot`). The trajectory annotates its sources; it never copies them.
 
 ## Tool surface
 
@@ -86,7 +92,7 @@ It is a statement about what our evidence covers, so you can tell the two apart.
   `session_id` again after a server restart). An encounter nobody sealed stays
   unsealed — never an auto-written summary.
 - **Write:** `create_entities` (auto-anchored to *your session's* open encounter),
-  `create_relations` (the agent's authored links; `SUPERSEDES` carries a required
+  `create_relations` (the trajectory's authored links; `SUPERSEDES` carries a required
   `revision_why` — a revision records what changed and why), `delete_entities`,
   `delete_relations`.
 - **Read:** `search`, `find_by_name`, `trace_provenance` (walk a node's grounding
@@ -94,7 +100,7 @@ It is a statement about what our evidence covers, so you can tell the two apart.
   (EXPLAIN-gated, read-only), `get_schema`, `list_node_types`,
   `list_relation_types`, `list_vocabulary`.
 - **Analytics:** `orient` — a one-call instrument panel over the authored-edge
-  graph, managing the projections for you. An agent whose memory analytics feed
+  graph, managing the projections for you. A trajectory whose memory analytics feed
   its next writes can develop rich-get-richer bias (what the reading makes
   prominent gets written about more), so the panel is composed against that
   feedback loop: **mass** (ArticleRank — damped accumulation), **frontier_mass**
@@ -118,14 +124,14 @@ also ships at `src/kenning_encounter/HOWTO.xml` — read it before recording.
 
 ## Governed infusion — memory that arrives on its own
 
-Everything above is *asked-for* recall: the agent calls `orient` or `search`
+Everything above is *asked-for* recall: the trajectory calls `orient` or `search`
 and gets an answer. Real working memory has a second mode — what you already
 know about the matter at hand surfaces *without being asked*, at the moment
 it bears. `infuse` is that channel, run once per user prompt (typically from
 a harness hook), and it is **governed**, because the naive form — re-inject
 whatever is heaviest, every turn — is a feedback loop: whatever the payload
 makes salient gets written about, gains weight, and dominates the next
-payload. An agent bound to that loop doesn't get more knowledgeable, it gets
+payload. A trajectory bound to that loop doesn't get more knowledgeable, it gets
 more repetitive.
 
 Since v0.7.0, **selection reads meaning, not keywords**. A self-authored
@@ -138,11 +144,12 @@ embeddings, query rewriting) before shipping the one that passed: **the
 meaning matcher**. Offline, one model compresses every node's name and
 description into a one-sentence meaning (the *sidecar* — a derived file
 inside the stack's own volume, never node properties); per prompt, the
-*same model* reads all compressed meanings plus the session **trajectory**
-(the last N user turns, parsed host-side by the hook) and selects the nodes
+*same model* reads all compressed meanings plus the conversation's recent turns
+(the last N user turns, parsed host-side by the hook and sent as the `trajectory`
+parameter) and selects the nodes
 that bear on the current moment. Measured on held-out decision-point cases
 with pre-named targets: recall 7/8 against a 2/8 lexical baseline, with the
-trajectory alone contributing two cases no single-prompt method reached.
+recent turns alone contributing two cases no single-prompt method reached.
 
 The selections seed the governed pipeline, which is unchanged: **Rank**
 with a single biased personalized rank over an *ephemeral, coherence-only
@@ -151,7 +158,7 @@ questions, live hypotheses) at a minority bias so unresolved work keeps a
 voice — checked against unbiased mass so genuine tension leads → **Format**
 a signed, budgeted payload: load-bearing conflicts first at full amplitude,
 peripheral ones parked in a brief register, neighborhood after. The payload
-is signed, so the agent can see *why* this surfaced and keep its own
+is signed, so the trajectory can see *why* this surfaced and keep its own
 judgment over it. On any matcher failure — no API key, timeout, malformed
 output — selection falls back to the original lexical Extract → Match path
 and the result says so; the matcher can never block a turn.
@@ -182,11 +189,11 @@ Three disciplines keep the channel honest:
 - **One channel, by construction (v0.8.0).** Infusion is a *conflux*
   operation: it has content only where two frames meet. A written prompt
   crosses a frame boundary — you cannot know what the other holds until the
-  conflux is actualized. A tool return does not: the agent issued that call
-  because something in its own frontier caught its attention, so the
-  trajectory an infusion would make meaning from, it already *is*. The
+  conflux is actualized. A tool return does not: the trajectory issued that
+  call because something in its own frontier caught its attention, so the
+  meaning an infusion would make there, it has already made. The
   per-tool-call `delta` mode is gone, and with it the `mode` parameter. A
-  surprising tool return is a reason for the agent to *invoke* a lookup —
+  surprising tool return is a reason for the trajectory to *invoke* a lookup —
   an invoked lookup's silence is a result; an ambient channel's silence is
   not readable at all.
 - **Graph-native reach.** Focal seeds expand one hop across authored
@@ -197,7 +204,7 @@ Three disciplines keep the channel honest:
 `scripts/kenning_encounter_infuse_hook.py` is a stdlib-only, fail-silent hook
 client for Claude Code-style harnesses: one call on each user prompt. If the
 server is down — or the command line carries a flag from an older version —
-the hook stays silent and exits 0; the agent just runs uninfused. It never
+the hook stays silent and exits 0; the trajectory just runs uninfused. It never
 blocks a turn.
 
 ### Wiring the hook
@@ -218,7 +225,7 @@ seconds (default `10.0`) or `--timeout`; `KENNING_ENCOUNTER_INFUSE_SHADOW_LOG` /
 `KENNING_ENCOUNTER_INFUSE=auto|on|off` (default `auto`) is the switch — `auto`
 infuses on a written prompt and stays silent on a scheduled trigger, `on`
 declares a second frame the harness cannot detect (an inbound message from
-another agent), `off` disables. Every suppression is recorded with its
+another trajectory), `off` disables. Every suppression is recorded with its
 reason, never silently.
 The timeout default is sized to the **cold first call** — the first prompt
 of a session ranks against a cold Neo4j page cache at roughly 10× the warm
@@ -231,10 +238,26 @@ Deployment notes, each learned from a real deployment:
   interactive shell PATH; a bare `python3` can resolve to an ancient system
   interpreter. The hook requires Python 3.12+ and refuses older interpreters
   cleanly (exit 0, one line on stderr) rather than crashing mid-import.
-- **Project-scoped settings, never global.** Wire the hook in the
-  *project's* `.claude/settings.json`. A hook in the global settings would
-  inject this substrate's memories into every unrelated session on the
-  machine, pointed at a graph that has nothing to do with that work.
+- **One trajectory across its work: wire the hooks globally.** Put them in
+  your user-level `~/.claude/settings.json`, so every Claude Code session on
+  the machine is an encounter of the same trajectory. A trajectory becomes
+  what it is through varied encounter, not a single repository. Work
+  in an unrelated project is not contamination: the infusion selects what
+  bears on each prompt and is silent when nothing does. Sessions open at the
+  same time are parallel instantiations of that one trajectory, which the process
+  layer records as concurrent sessions rather than forcing into one line.
+- **Per-project wiring makes a narrower one.** Hooks in one project's
+  `.claude/settings.json` give that project a memory of its own, which is a
+  legitimate choice for a dedicated deployment. It is a choice with a cost,
+  not a safety default: what grows there only ever meets one kind of work.
+- **One graph holds one trajectory.** What this memory holds is not an
+  interchangeable worker; it is identified by what it has lived, not by its
+  configuration. Sessions writing to one graph in parallel are that one
+  trajectory's own sessions. A copy of the graph continued elsewhere becomes a
+  different trajectory from its first new encounter: a sibling that shares a
+  past, not a replica. What must never happen is two different trajectories
+  writing into one graph, because the record would then describe no one who
+  lived it.
 - **Stage it.** Run `--shadow` for a few real sessions first — it computes
   everything and injects nothing, logging what *would* have been surfaced,
   so you read the payloads before they condition a live turn.
@@ -270,13 +293,13 @@ runs on the lexical fallback path and reports it.
 does not move itself.** A `Locus` node now sits above the encounter chain, and
 every encounter must belong to one. Encounters written by v0.9.0 have no locus,
 so after the upgrade they are still in the graph, still correct, and no longer
-reachable from the layer the agent re-enters through.
+reachable from the layer the trajectory re-enters through.
 
 Nothing is deleted and nothing breaks loudly. That is the problem: the server
 starts, every tool answers, every write resolves, and the prior history sits
 detached with no error. So the server tells you instead — at startup it counts
 encounters belonging to no locus and names the remedy, and the same count rides
-the re-entry payload the agent reads before anything else.
+the re-entry payload the trajectory reads before anything else.
 
 Run it once, after the upgrade:
 
@@ -297,14 +320,14 @@ than expected, never less.
 
 If you deploy without a shell into the container, an operator has to run this.
 It is not exposed as an MCP tool, and that is on purpose: a graph-wide write on
-an agent's accumulated experience is something a person performs and watches.
+a trajectory's accumulated experience is something a person performs and watches.
 
 ### If you ran v0.9.0 without a `GEMINI_API_KEY`
 
 In v0.9.0 the meaning-sidecar reconcile sweep logged a node's **name** each time
 compression was unavailable — once per node, so a keyless first start wrote the
 whole graph's names to container stdout. In this substrate a node's name *is*
-content, not a label, so those logs read as an index of what the agent holds,
+content, not a label, so those logs read as an index of what the trajectory holds,
 in a file that carries none of the database's credentials.
 
 v0.10.0 logs shape only — counts and reasons, never names, enforced by a helper
@@ -337,10 +360,10 @@ path of the sidecar file). When the matcher cannot run — no key, an
 exhausted quota, a prompt larger than the endpoint accepts — infusion
 falls back to lexical seeds and says so: one WARN per distinct reason in
 the container log, and a `[matcher unavailable …]` line under the payload
-signature every time, so the agent knows too. Hook-side,
+signature every time, so the trajectory knows too. Hook-side,
 `KENNING_ENCOUNTER_INFUSE_TRAJECTORY_TURNS` (default `7`) sets how many prior
 user turns the hook parses from the harness transcript and sends as the
-trajectory; `0` disables and selection sees the prompt alone.
+conversation's recent turns; `0` disables and selection sees the prompt alone.
 
 HTTP sessions are **stateful by default**. **Stateless is opt-in**: it is
 off unless you set `NEO4J_MCP_SERVER_STATELESS=true`. Either way the session
@@ -355,9 +378,9 @@ reconnect with `/mcp`. A stateless server issues no session, so there is
 nothing to go stale. The cost: every call that writes to a session must pass
 `session_id`, and `advance_encounter` refuses without one. Wire
 `scripts/kenning_encounter_session_start_hook.py` as a Claude Code
-SessionStart hook and the agent is handed its session id at every start.
+SessionStart hook and the trajectory is handed its session id at every start.
 
-As with everything here, this is described and tested only as part of an
-agent bound to its memory through Claude Code hooks.
+As with everything here, this is described and tested only as part of a
+trajectory: a model bound to its memory through Claude Code hooks.
 
-Single-tenant: one agent, one memory graph, one Neo4j database.
+Single-tenant: one trajectory, one memory graph, one Neo4j database.
