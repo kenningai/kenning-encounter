@@ -726,6 +726,7 @@ def format_payload(
     standing_nodes: list[dict[str, Any]] | None = None,
     progressions: list[dict[str, Any]] | None = None,
     selection_note: str | None = None,
+    meaning_matched: bool = False,
 ) -> tuple[str, dict[str, list[str]]]:
     """Assemble the signed governed payload, coherence tension first.
 
@@ -755,8 +756,16 @@ def format_payload(
     `progressions` rows: {"component", "lines", "bodies", "steps"} from
     `format_progression`.
     """
+    # The first thing the trajectory reads names the seed channel. Until
+    # v0.16.3 a meaning-matched payload still opened "awakened from:
+    # <keywords>" — the lexical Extract, computed but not used to seed — so
+    # a healthy header and a degraded one looked alike.
+    seeds = (
+        "seeds: meaning-matched" if meaning_matched
+        else f"awakened from: {', '.join(seed_terms) or '(frontier only)'}"
+    )
     header = (
-        f"[substrate proposal — awakened from: {', '.join(seed_terms) or '(frontier only)'}"
+        f"[substrate proposal — {seeds}"
         f" | seed mode: {seed_mode} | a proposal from the sediment, not a conclusion]"
     )
     # Part of the signature: laid down first, never yields to the budget.

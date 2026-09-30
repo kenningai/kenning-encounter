@@ -304,6 +304,19 @@ class TestFormatPayload:
         assert first.startswith("[substrate proposal — awakened from: checkpoint")
         assert "not a conclusion" in first
 
+    def test_a_meaning_matched_header_names_its_channel(self):
+        """v0.16.3: a meaning-matched payload opened with the lexical
+        keywords too, so a healthy header and a degraded one looked alike."""
+        first = _payload(meaning_matched=True).splitlines()[0]
+        assert first.startswith("[substrate proposal — seeds: meaning-matched |")
+        assert "awakened from" not in first
+        assert "checkpoint" not in first, "the unused keywords do not appear"
+
+    def test_a_lexical_header_still_names_its_keywords(self):
+        first = _payload(meaning_matched=False).splitlines()[0]
+        assert "awakened from: checkpoint" in first
+        assert "meaning-matched" not in first
+
     def test_tension_first_parked_last(self):
         p = _payload()
         assert p.index("CORE TENSION") < p.index("NEIGHBORHOOD")

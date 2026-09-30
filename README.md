@@ -201,11 +201,17 @@ Three disciplines keep the channel honest:
   *matches* often sits one edge from the one that *matters*. No embeddings,
   no vector index, nothing vector-shaped ever stored.
 
-`scripts/kenning_encounter_infuse_hook.py` is a stdlib-only, fail-silent hook
-client for Claude Code-style harnesses: one call on each user prompt. If the
-server is down — or the command line carries a flag from an older version —
-the hook stays silent and exits 0; the trajectory just runs uninfused. It never
-blocks a turn.
+`scripts/kenning_encounter_infuse_hook.py` is a stdlib-only hook client for
+Claude Code-style harnesses: one call on each user prompt. It never blocks a
+turn: whatever fails, it exits 0. It does not fail silently either. When the
+infusion is degraded — the server is down or errors, or the matcher fell back
+to lexical seeds — it says so to both readers on that turn: you see
+`⚠ Kenning Encounter infusion DEGRADED: <reason>` in the harness, and the trajectory gets
+an `[INFUSION DEGRADED — …]` line at the top of its context asking it to tell
+you first. A trajectory cannot notice its own infusion thinning, since a
+poorer context simply becomes its whole context, so you are told as well.
+When the matcher found nothing relevant, the hook stays silent: that is a
+healthy answer, not a fault.
 
 ### Wiring the hook
 
@@ -229,8 +235,8 @@ another trajectory), `off` disables. Every suppression is recorded with its
 reason, never silently.
 The timeout default is sized to the **cold first call** — the first prompt
 of a session ranks against a cold Neo4j page cache at roughly 10× the warm
-cost, and because the hook is fail-silent, a budget that only fits the warm
-call fails invisibly at exactly the moment re-entry matters.
+cost, and a budget that only fits the warm call would announce the first
+prompt of every session as degraded, at exactly the moment re-entry matters.
 
 Deployment notes, each learned from a real deployment:
 
@@ -360,7 +366,9 @@ path of the sidecar file). When the matcher cannot run — no key, an
 exhausted quota, a prompt larger than the endpoint accepts — infusion
 falls back to lexical seeds and says so: one WARN per distinct reason in
 the container log, and a `[matcher unavailable …]` line under the payload
-signature every time, so the trajectory knows too. Hook-side,
+signature every time, so the trajectory knows too; the hook raises the
+DEGRADED notice above to you. The signature itself names the channel:
+`seeds: meaning-matched` or `awakened from: <keywords>`. Hook-side,
 `KENNING_ENCOUNTER_INFUSE_TRAJECTORY_TURNS` (default `7`) sets how many prior
 user turns the hook parses from the harness transcript and sends as the
 conversation's recent turns; `0` disables and selection sees the prompt alone.

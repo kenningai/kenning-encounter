@@ -2009,6 +2009,7 @@ class Neo4jKenningEncounter:
                 else max(0.0, min(1.0, expansion_bias))
             ),
             selection_note=matcher_fallback_note(selection_meta),
+            meaning_matched=seed_matches is not None,
         )
         result["selection_channel"] = (
             "meaning" if seed_matches is not None else "lexical"
@@ -2030,6 +2031,7 @@ class Neo4jKenningEncounter:
         refresh_turns: int = 10,
         expansion_bias: float = 0.5,
         selection_note: str | None = None,
+        meaning_matched: bool = False,
     ) -> dict[str, Any]:
         """The full governed payload: one biased rank blending focal and
         frontier seeds over an ephemeral coherence-only projection, divergence
@@ -2483,6 +2485,7 @@ class Neo4jKenningEncounter:
             standing_nodes=standing_nodes,
             progressions=prog_renders,
             selection_note=selection_note,
+            meaning_matched=meaning_matched,
         )
 
         # Delivery-gated ledger stamp (v0.7.1). Only bodies that actually

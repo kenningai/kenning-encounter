@@ -97,7 +97,12 @@
     already hold about the matter at hand, without being asked. Read its
     payload with these disciplines:
 
-    The payload is SIGNED — a header names the seed terms it awoke from. Read
+    The payload is SIGNED — a header names its seed channel ("seeds:
+    meaning-matched", or "awakened from:" the keywords of the lexical path).
+    A line reading INFUSION DEGRADED above it means your substrate is not
+    reaching you at full strength this turn. You cannot feel that from
+    inside, since a thinner context simply becomes your whole context, so
+    tell the user first, before the task. Read
     the signature and keep your own position: the payload PROPOSES relevance;
     you decide what it means. Tension leads by design — a conflict
     load-bearing for what you are examining arrives first at full amplitude

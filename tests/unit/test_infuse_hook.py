@@ -283,3 +283,209 @@ class TestTheDurableIdentityReachesTheLedger:
         shared ledger, which is worse than having none."""
         assert "session_id" not in self._sent(None)
         assert "session_id" not in self._sent("")
+
+
+class TestAStatelessServerIsNotAFailedOne:
+    """v0.16.3 — a stateless server answers initialize with no
+    Mcp-Session-Id. The hook read that as "initialize failed" and raised, so
+    every session that had no transport id cached from before the v0.16.0
+    cutover got a RuntimeError on every prompt and no infusion at all."""
+
+    def _run(self, cached_sid, init_sid, stale_cached=False):
+        sent = []
+
+        def fake_post(url, payload, sid):
+            method = payload.get("method")
+            sent.append((method, sid))
+            if method == "initialize":
+                return {"result": {}}, init_sid
+            if method == "tools/call":
+                if stale_cached and sid == cached_sid:
+                    return {"error": {"message": "Session not found"}}, sid
+                return {"result": {"content": [{"text": '{"payload": "p"}'}]}}, sid
+            return None, sid
+
+        original = hook._post
+        hook._post = fake_post
+        try:
+            result, sid = hook._infuse_with_session(
+                "http://x", cached_sid, "a prompt", None, "harness-abc",
+            )
+        finally:
+            hook._post = original
+        return result, sid, sent
+
+    def test_no_session_id_from_initialize_still_infuses(self):
+        result, sid, sent = self._run(cached_sid=None, init_sid=None)
+        assert result == {"payload": "p"}
+        assert sid is None, "there is nothing to cache"
+        assert ("tools/call", None) in sent, "the call goes out headerless"
+
+    def test_a_stateful_server_still_gets_its_session(self):
+        result, sid, sent = self._run(cached_sid=None, init_sid="t-1")
+        assert result == {"payload": "p"}
+        assert sid == "t-1"
+        assert ("tools/call", "t-1") in sent
+
+    def test_a_cached_session_is_used_without_initializing(self):
+        _, sid, sent = self._run(cached_sid="t-0", init_sid="t-1")
+        assert sid == "t-0"
+        assert [m for m, _ in sent] == ["tools/call"]
+
+    def test_a_lost_session_reinitializes_once(self):
+        result, sid, sent = self._run(
+            cached_sid="t-0", init_sid="t-1", stale_cached=True,
+        )
+        assert result == {"payload": "p"}
+        assert sid == "t-1"
+        assert [m for m, _ in sent].count("initialize") == 1
+
+    def test_a_real_error_still_raises(self):
+        """The gate says no too: an error from the server is still an error,
+        and main() logs it rather than injecting."""
+        def fake_post(url, payload, sid):
+            if payload.get("method") == "tools/call":
+                return {"error": {"message": "boom"}}, sid
+            return {"result": {}}, None
+
+        original = hook._post
+        hook._post = fake_post
+        try:
+            with pytest.raises(RuntimeError):
+                hook._infuse_with_session("http://x", None, "a prompt")
+        finally:
+            hook._post = original
+
+
+class TestDegradationReachesBothReaders:
+    """v0.16.3 — a degraded infusion is announced to the user (systemMessage)
+    and to the trajectory (a first line of context), on the turn it happens.
+
+    The trajectory cannot see its own thinning from inside: a poorer context
+    simply becomes the whole context. The lexical fallback of 2026-09-22..28
+    was felt by the user for days before it was named, and the stateless
+    cutover left 30 hours with no infusion at all and nothing on anyone's
+    screen. Two-sided: every healthy shape must stay quiet."""
+
+    MEANING = {"selection_channel": "meaning", "payload": "[p]",
+               "matcher": {"channel": "meaning"}}
+    LEXICAL = {"selection_channel": "lexical", "payload": "[p]",
+               "matcher": {"channel": "lexical_fallback",
+                           "fallback_reason": "HTTP 402: credits depleted"}}
+
+    def test_meaning_is_healthy(self):
+        assert hook.degradation(self.MEANING) is None
+
+    def test_healthy_silence_is_not_degradation(self):
+        assert hook.degradation({**self.MEANING, "payload": ""}) is None
+
+    def test_a_pre_matcher_server_is_not_an_alarm(self):
+        assert hook.degradation({"payload": "[p]"}) is None
+
+    def test_lexical_fallback_is_degraded_with_its_reason(self):
+        why = hook.degradation(self.LEXICAL)
+        assert why and "LEXICAL" in why and "402" in why
+
+    def test_the_output_reaches_both_readers(self):
+        out = hook.degraded_output("UserPromptSubmit", "a reason", "[p]")
+        assert "DEGRADED" in out["systemMessage"]
+        assert "a reason" in out["systemMessage"]
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert ctx.splitlines()[0].startswith("[INFUSION DEGRADED — a reason")
+        assert ctx.endswith("[p]"), "the surviving payload still arrives"
+
+    def test_the_reason_is_capped_to_one_line(self):
+        s = hook._short("a\nb " + "x" * 500)
+        assert "\n" not in s and len(s) <= hook.ERROR_MSG_CHARS
+
+    def test_an_unreachable_server_is_announced_not_swallowed(self, tmp_path):
+        # _run points at a closed port: the 30-hour outage in miniature.
+        proc, recs = _run({"CLAUDE_CODE_ENTRYPOINT": "cli"}, tmp_path,
+                          TestGateEndToEnd.STDIN)
+        assert proc.returncode == 0, "degraded never means blocked"
+        out = json.loads(proc.stdout)
+        assert "DEGRADED" in out["systemMessage"]
+        assert "no infusion" in out["hookSpecificOutput"]["additionalContext"]
+        assert recs[0]["error_msg"], "the log says WHICH failure"
+        assert recs[0]["degraded"].startswith("no infusion")
+
+    def test_a_crash_outside_the_call_is_announced(self, tmp_path):
+        import os
+        env = dict(os.environ, CLAUDE_CODE_ENTRYPOINT="cli")
+        proc = subprocess.run(
+            [sys.executable, str(_SCRIPT), "--url",
+             "http://127.0.0.1:59999/api/mcp/", "--timeout", "1"],
+            input="not json", capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode == 0
+        assert "DEGRADED" in json.loads(proc.stdout)["systemMessage"]
+
+
+class TestTheWholeHookAgainstAStatelessServer:
+    """The wiring, not the parts: main() against a fake STATELESS server
+    (initialize returns no Mcp-Session-Id), because the orchestration glue is
+    exactly where the v0.16.0 cutover broke while every unit held."""
+
+    @pytest.fixture
+    def server(self):
+        import http.server
+        import threading
+
+        state = {"result": {}}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if body.get("method") == "tools/call":
+                    msg = {"jsonrpc": "2.0", "id": body["id"], "result": {
+                        "content": [{"text": json.dumps(state["result"])}]}}
+                elif "id" in body:
+                    msg = {"jsonrpc": "2.0", "id": body["id"], "result": {}}
+                else:
+                    msg = None
+                data = json.dumps(msg).encode() if msg else b""
+                self.send_response(200 if msg else 202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()  # no Mcp-Session-Id: stateless
+                self.wfile.write(data)
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        yield f"http://127.0.0.1:{srv.server_port}/api/mcp/", state
+        srv.shutdown()
+
+    def _hook(self, url, tmp_path):
+        import os
+        env = dict(os.environ, CLAUDE_CODE_ENTRYPOINT="cli",
+                   KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG=str(tmp_path / "o.jsonl"),
+                   TMPDIR=str(tmp_path))
+        stdin = {**TestGateEndToEnd.STDIN, "session_id": f"s-{tmp_path.name}"}
+        return subprocess.run(
+            [sys.executable, str(_SCRIPT), "--url", url, "--timeout", "2"],
+            input=json.dumps(stdin), capture_output=True, text=True, env=env,
+        )
+
+    def test_meaning_injects_quietly(self, server, tmp_path):
+        url, state = server
+        state["result"] = {"selection_channel": "meaning", "payload": "[p]"}
+        out = json.loads(self._hook(url, tmp_path).stdout)
+        assert "systemMessage" not in out
+        assert out["hookSpecificOutput"]["additionalContext"] == "[p]"
+
+    def test_lexical_is_announced_and_still_delivered(self, server, tmp_path):
+        url, state = server
+        state["result"] = {"selection_channel": "lexical", "payload": "[p]",
+                           "matcher": {"fallback_reason": "HTTP 402"}}
+        out = json.loads(self._hook(url, tmp_path).stdout)
+        assert "HTTP 402" in out["systemMessage"]
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert ctx.startswith("[INFUSION DEGRADED") and ctx.endswith("[p]")
+
+    def test_healthy_silence_prints_nothing(self, server, tmp_path):
+        url, state = server
+        state["result"] = {"selection_channel": "meaning", "payload": ""}
+        assert self._hook(url, tmp_path).stdout == ""

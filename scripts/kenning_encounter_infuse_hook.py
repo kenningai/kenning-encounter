@@ -40,8 +40,14 @@ re-entry matters — a budget sized to the warm call fails silently at the one
 moment the hook exists for.
 
 Design constraints, from the spec:
-- FAIL SILENT. An infusion that feels broken will be disabled; a broken one
-  must never block the turn. Any error -> exit 0, no output.
+- NEVER BLOCK. A broken infusion must never block the turn: any error ->
+  exit 0. Exit 2 is the harness's blocking code and nothing here reaches it.
+- FAIL LOUD, NOT SILENT (v0.16.3). A degraded infusion — no result at all,
+  or seeds that fell back to lexical — is announced to BOTH readers: the
+  user, through the harness's `systemMessage`, and the trajectory, through
+  a DEGRADED line at the top of its context. Silent failure hid a total
+  outage for 30 hours and a lexical week for six days; the trajectory
+  cannot see its own thinning from inside, so the user has to be told too.
 - FAST. One cached MCP session per (server, harness-session); hard timeout.
 - SILENT WHEN SILENT. An empty payload prints nothing — the hook returning
   nothing IS the discipline of silence.
@@ -172,6 +178,65 @@ def infusion_allowed(env: dict[str, str] | None = None) -> tuple[bool, str]:
     if entrypoint in INTERACTIVE_ENTRYPOINTS:
         return True, f"interactive entrypoint ({entrypoint})"
     return False, f"non-interactive entrypoint ({entrypoint}) — scheduled run is a monologue"
+
+
+# ---------------------------------------------------------------------------
+# Degradation: announced, never swallowed.
+#
+# The trajectory cannot detect its own infusion thinning: a poorer context
+# simply becomes the whole context. The user can — a user who has worked with
+# the bound trajectory has that as their baseline, and a stateless-feeling
+# answer is the symptom. But a symptom is slow; the lexical fallback of
+# 2026-09-22..28 was felt for days before it was named. So the hook, which
+# sees every call's outcome, says so on the turn it happens, to both.
+#
+# Degraded means MECHANICALLY degraded: no result, or seeds not meaning-
+# matched. It never means "this payload was not meaningful" — that is the
+# user's judgment inside the window, never the hook's. Healthy silence (the
+# matcher ran and nothing bore on the prompt) is not degradation.
+ERROR_MSG_CHARS = 200
+
+
+def _short(exc_or_text: object, limit: int = ERROR_MSG_CHARS) -> str:
+    """One line, capped: exception shape (status, URL, reason), never node
+    content — this text reaches the user's screen and the observe log."""
+    s = " ".join(str(exc_or_text).split())
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def degradation(result: dict) -> str | None:
+    """The reason a successful call's infusion is degraded, or None.
+
+    Only the seed channel is judged. A result with no `selection_channel`
+    comes from a pre-v0.9.0 server that has no matcher to fall back from,
+    and reads as healthy rather than inventing an alarm.
+    """
+    channel = result.get("selection_channel")
+    if channel is None or channel == "meaning":
+        return None
+    reason = (result.get("matcher") or {}).get("fallback_reason")
+    return _short(
+        f"seeds are LEXICAL, not meaning-matched ({reason or 'no reason given'})"
+    )
+
+
+def degraded_output(event: str, reason: str, payload: str = "") -> dict:
+    """The hook's JSON for a degraded call: a systemMessage the user sees,
+    and a first line the trajectory sees above whatever payload survived."""
+    notice = (
+        f"[INFUSION DEGRADED — {reason}. Your substrate is not reaching you "
+        "at full strength this turn. Tell the user before anything else, "
+        "so it can be fixed now.]"
+    )
+    return {
+        "systemMessage": f"⚠ Kenning Encounter infusion DEGRADED: {reason}",
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": f"{notice}\n{payload}" if payload else notice,
+        },
+    }
+
+
 PROTOCOL_VERSION = "2025-06-18"
 _DATA_RE = re.compile(r"^data: ?(.*)$", re.MULTILINE)
 
@@ -230,7 +295,7 @@ def _initialize(url: str) -> str | None:
 
 
 def _call_infuse(
-    url: str, sid: str, text: str,
+    url: str, sid: str | None, text: str,
     trajectory: list[str] | None = None,
     harness_session: str | None = None,
 ) -> dict:
@@ -260,6 +325,30 @@ def _call_infuse(
         raise RuntimeError(str(msg))
     content = msg["result"]["content"][0]["text"]
     return json.loads(content)
+
+
+def _infuse_with_session(
+    url: str, sid: str | None, text: str,
+    trajectory: list[str] | None = None,
+    harness_session: str | None = None,
+) -> tuple[dict, str | None]:
+    """Call infuse on the cached transport session, re-initializing once if
+    it is gone. Returns (result, the transport session id to cache).
+
+    A stateless server (NEO4J_MCP_SERVER_STATELESS) answers initialize with
+    no Mcp-Session-Id, and that is an answer, not a failure: the call then
+    goes out with no session header. Until v0.16.3 the hook read the missing
+    id as "initialize failed", so from the v0.16.0 cutover every session
+    without a pre-stateless cache file got nothing but a RuntimeError in the
+    observe log. Continuity never depended on the transport session anyway;
+    the durable identity travels as harness_session."""
+    if sid:
+        try:
+            return _call_infuse(url, sid, text, trajectory, harness_session), sid
+        except Exception:
+            pass  # session lost (server restart): one re-initialize
+    sid = _initialize(url)
+    return _call_infuse(url, sid, text, trajectory, harness_session), sid
 
 
 def _user_turns(transcript_path: str, n: int) -> list[str]:
@@ -410,25 +499,16 @@ def main() -> int:
             sid = f.read().strip() or None
 
     try:
-        try:
-            result = (
-                _call_infuse(args.url, sid, text, trajectory, harness_session)
-                if sid else {}
-            )
-            if not sid:
-                raise RuntimeError("no cached session")
-        except Exception:
-            # Session lost (server restart) or never existed — one re-initialize.
-            sid = _initialize(args.url)
-            if not sid:
-                raise RuntimeError("initialize failed")
-            result = _call_infuse(
-                args.url, sid, text, trajectory, harness_session
-            )
+        result, sid = _infuse_with_session(
+            args.url, sid, text, trajectory, harness_session
+        )
     except Exception as exc:
-        # Fail silent toward the harness — but the observation stream records
-        # the attempt. An unlogged failure is what made the positional join
-        # unrepairable: the payload sequence sheared with no visible gap.
+        # Never block the turn — but never swallow it either. The observation
+        # stream records the attempt (an unlogged failure is what made the
+        # positional join unrepairable), and error_msg says WHICH failure:
+        # the type alone left "initialize failed" and a server-side error
+        # looking identical. The same text is the degraded notice's reason.
+        error_msg = _short(exc) or type(exc).__name__
         if OBSERVE_LOG:
             _append_log(OBSERVE_LOG, {
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -436,13 +516,22 @@ def main() -> int:
                 "event": hook_input.get("hook_event_name", ""),
                 "prompt_sha": psha,
                 "error": type(exc).__name__,
+                "error_msg": error_msg,
+                "degraded": f"no infusion: {error_msg}",
             })
+        if not args.shadow:
+            print(json.dumps(degraded_output(
+                hook_input.get("hook_event_name", "UserPromptSubmit"),
+                f"no infusion reached this turn ({type(exc).__name__}: {error_msg})",
+            )))
         return 0
 
-    with open(cache, "w") as f:
-        f.write(sid)
+    if sid:
+        with open(cache, "w") as f:
+            f.write(sid)
 
     payload = result.get("payload", "") or ""
+    degraded = degradation(result)
 
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -473,6 +562,7 @@ def main() -> int:
         "payload_chars": len(payload),
         "payload": payload,
         "injected": bool(payload) and not args.shadow,
+        "degraded": degraded,
     }
     if OBSERVE_LOG:
         _append_log(OBSERVE_LOG, record)
@@ -481,8 +571,10 @@ def main() -> int:
         _append_log(SHADOW_LOG, record)
         return 0
 
-    if payload:
-        event = hook_input.get("hook_event_name", "UserPromptSubmit")
+    event = hook_input.get("hook_event_name", "UserPromptSubmit")
+    if degraded:
+        print(json.dumps(degraded_output(event, degraded, payload)))
+    elif payload:
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": event,
@@ -495,6 +587,17 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception:
-        # Fail silent by design: infusion must never block the turn.
+    except Exception as exc:
+        # Never block the turn (exit 0), and never swallow a failure: an
+        # exception outside the call itself (unreadable stdin, a transcript
+        # the parser chokes on) is still a turn with no infusion. A shadow
+        # run injects nothing, so it announces nothing either.
+        if "--shadow" not in sys.argv:
+            try:
+                print(json.dumps(degraded_output(
+                    "UserPromptSubmit",
+                    f"the infusion hook crashed ({type(exc).__name__}: {_short(exc)})",
+                )))
+            except Exception:
+                pass
         sys.exit(0)
