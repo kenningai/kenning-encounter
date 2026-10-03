@@ -1303,12 +1303,6 @@ class Neo4jKenningEncounter:
             logger.warning(f"spine health check unavailable: {e}")
             return 0
 
-    # Reserved names for the orient projections. Fixed names (not per-call
-    # ones) let a crashed prior orient be cleaned up defensively. The _asof
-    # projection is the previous-waking baseline used by the drift reading.
-    _ORIENT_PROJECTION = "__kenning_encounter_orient__"
-    _ORIENT_ASOF_PROJECTION = "__kenning_encounter_orient_asof__"
-
     async def _frontier(self, limit: int = 20) -> dict[str, Any]:
         """The epistemic frontier: where the topology is thinnest, derived from
         existing structure (no new schema, no GDS). orient surfaces what you
@@ -1434,8 +1428,13 @@ class Neo4jKenningEncounter:
         Within the Exist, reach for the single gds_* tools when a specific
         question arises; this is the opening survey.
         """
-        proj = self._ORIENT_PROJECTION
-        asof = self._ORIENT_ASOF_PROJECTION
+        # Per-call names, as infuse and compare use. Fixed names collided:
+        # two faces share one GDS catalog, and an orient's defensive cleanup
+        # dropped the projection a concurrent orient was still streaming.
+        # The _asof projection is the previous-waking baseline for drift.
+        tag = uuid.uuid4().hex[:8]
+        proj = f"__kenning_encounter_orient_{tag}__"
+        asof = f"__kenning_encounter_orient_asof_{tag}__"
         rel_filter, source_labels, target_labels = coherence_projection_parts()
         project_query = lit(
             f"MATCH (source)-[r:{rel_filter}]->(target) "
@@ -1511,11 +1510,6 @@ class Neo4jKenningEncounter:
             )
             return [dict(r) for r in res.records]
 
-        # Defensive: clear any projections a crashed prior orient left behind.
-        for name in (proj, asof):
-            await self.driver.execute_query(
-                drop_query, {"proj": name}, routing_=RoutingControl.WRITE
-            )
         try:
             proj_result = await self.driver.execute_query(
                 project_query, {"proj": proj}, routing_=RoutingControl.READ

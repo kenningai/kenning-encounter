@@ -3,9 +3,11 @@
 
 Offline batch (latency irrelevant): reads every semantic + reference node
 (name + description, NOT Encounters) from Neo4j read-only, compresses each
-through gemini-3.5-flash-lite — THE SAME MODEL that matches, which is
+through one VOICE — the same model that will match against it, which is
 load-bearing: single-voice authorship is what kills the two-idiolect
-problem — and writes models/meaning_sidecar.json.
+problem — and writes that voice's stamped sidecar beside --out
+(models/meaning_sidecar.<provider>-<model>.json). Gemini by default;
+--provider openai builds the OpenAI voice's.
 
 Idempotent by content hash: unchanged nodes keep their meaning, new or
 edited nodes recompute, departed nodes drop. Nothing is ever written to
@@ -24,13 +26,13 @@ copy into the volume (docker cp <file> kenning_encounter-mcp:/app/models/).
 Usage (plain argv, any shell):
     uv run python scripts/build_meaning_sidecar.py
     uv run python scripts/build_meaning_sidecar.py --out models/meaning_sidecar.json --concurrency 8
+    uv run python scripts/build_meaning_sidecar.py --provider openai
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
@@ -38,12 +40,17 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from kenning_encounter.meaning import MEANING_PROMPT, content_hash  # noqa: E402
-
-_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
-_MODEL = "gemini-3.5-flash-lite"
-_DESC_CAP = 4000
-_MEANING_MAX_TOKENS = 256
+from kenning_encounter.meaning import (  # noqa: E402
+    DEFAULT_MODELS,
+    KEY_ENV,
+    PROVIDERS,
+    MeaningIndex,
+    MeaningUnavailable,
+    Voice,
+    compress_meaning,
+    content_hash,
+    sidecar_path,
+)
 
 
 def _env_from_dotenv() -> None:
@@ -74,37 +81,17 @@ async def _fetch_nodes(uri: str, user: str, password: str, database: str):
         await driver.close()
 
 
-async def _compress(client, sem, api_key: str, node: dict) -> tuple[str, str]:
-    prompt = MEANING_PROMPT.format(
-        type=node["type"], name=node["name"],
-        description=node["description"][:_DESC_CAP],
-    )
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0, "maxOutputTokens": _MEANING_MAX_TOKENS,
-        },
-    }
+async def _compress(sem, voice: Voice, node: dict) -> tuple[str, str]:
+    """The server's own compression call, with retries for a batch run."""
     async with sem:
         for attempt in range(3):
             try:
-                resp = await client.post(
-                    f"{_ENDPOINT}/models/{_MODEL}:generateContent",
-                    json=payload, headers={"x-goog-api-key": api_key},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                parts = data["candidates"][0]["content"].get("parts", [])
-                text = " ".join(
-                    "".join(p.get("text", "") for p in parts).split()
-                )
-                if text:
-                    return node["name"], text
-            except Exception as e:
+                return node["name"], await compress_meaning(node, voice)
+            except MeaningUnavailable as e:
                 if attempt == 2:
                     raise RuntimeError(f"{node['name']}: {e}") from e
                 await asyncio.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"{node['name']}: empty output after retries")
+    raise RuntimeError(f"{node['name']}: no output after retries")
 
 
 async def main() -> int:
@@ -112,6 +99,11 @@ async def main() -> int:
     parser.add_argument("--out", default="models/meaning_sidecar.json")
     parser.add_argument("--db-url", default=None)
     parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument("--provider", choices=PROVIDERS, default="gemini")
+    parser.add_argument(
+        "--model", default=None,
+        help="Model for the voice (default: the provider's matcher default)",
+    )
     parser.add_argument(
         "--force", action="store_true",
         help="Recompute every node, ignoring content hashes",
@@ -119,10 +111,12 @@ async def main() -> int:
     args = parser.parse_args()
 
     _env_from_dotenv()
-    api_key = os.environ.get("GEMINI_API_KEY", "")
+    key_env = KEY_ENV[args.provider]
+    api_key = os.environ.get(key_env, "")
     if not api_key:
-        print("GEMINI_API_KEY not set (env or .env)", file=sys.stderr)
+        print(f"{key_env} not set (env or .env)", file=sys.stderr)
         return 1
+    voice = Voice(args.provider, args.model or DEFAULT_MODELS[args.provider], api_key)
 
     uri = args.db_url or os.environ.get("NEO4J_URL") or "bolt://localhost:7687"
     password = (
@@ -135,13 +129,10 @@ async def main() -> int:
     nodes = await _fetch_nodes(uri, user, password, database)
     print(f"corpus: {len(nodes)} nodes (semantic + reference, no Encounters)")
 
-    out_path = Path(args.out)
-    existing: dict = {}
-    if out_path.is_file() and not args.force:
-        try:
-            existing = json.loads(out_path.read_text()).get("nodes", {})
-        except Exception:
-            existing = {}
+    out_path = sidecar_path(args.out, voice)
+    index = MeaningIndex(out_path, voice.id)
+    # Only this voice's own earlier meanings are reused.
+    existing: dict = {} if args.force else index.known_nodes()
 
     result: dict[str, dict] = {}
     todo: list[dict] = []
@@ -157,29 +148,20 @@ async def main() -> int:
     print(f"unchanged: {len(result)} | to compress: {len(todo)}")
 
     if todo:
-        import httpx
-
         sem = asyncio.Semaphore(args.concurrency)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            done = 0
-            for coro in asyncio.as_completed(
-                [_compress(client, sem, api_key, n) for n in todo]
-            ):
-                name, meaning = await coro
-                node = next(n for n in todo if n["name"] == name)
-                result[name] = {"type": node["type"], "hash": node["hash"],
-                                "meaning": meaning}
-                done += 1
-                if done % 50 == 0 or done == len(todo):
-                    print(f"  compressed {done}/{len(todo)}")
+        done = 0
+        for coro in asyncio.as_completed([_compress(sem, voice, n) for n in todo]):
+            name, meaning = await coro
+            node = next(n for n in todo if n["name"] == name)
+            result[name] = {"type": node["type"], "hash": node["hash"],
+                            "meaning": meaning}
+            done += 1
+            if done % 50 == 0 or done == len(todo):
+                print(f"  compressed {done}/{len(todo)}")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(
-        {"model": _MODEL, "prompt_version": "v2", "nodes": result},
-        indent=1, ensure_ascii=False,
-    ))
+    index._write(result)
     total_chars = sum(len(v["meaning"]) for v in result.values())
-    print(f"wrote {out_path} — {len(result)} meanings, ~{total_chars:,} chars "
+    print(f"wrote {out_path} ({voice.id}) — {len(result)} meanings, ~{total_chars:,} chars "
           f"(~{total_chars // 4:,} tokens as the matcher prefix)")
     return 0
 

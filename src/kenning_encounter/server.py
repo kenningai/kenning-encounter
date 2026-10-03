@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -36,18 +37,28 @@ from .kenning_encounter import (
     _SERVER_VERSION,
 )
 from .meaning import (
+    DEFAULT_MODELS,
     MeaningIndex,
     MeaningUnavailable,
+    Voice,
+    VoiceHealth,
     assemble_trajectory,
     compress_meaning,
     content_hash,
     deferral_summary,
     format_meaning_report,
+    match_chain,
     match_meanings,
+    new_match_id,
     record_deferral,
+    shadow_record,
     sidecar_diff,
+    sidecar_path,
     user_turns_from_transcript,
+    voice_order,
+    voice_summary,
 )
+from .reader import HIDDEN_QUERY, READER_TOOLS, ReaderMiddleware
 from .utils import format_namespace, _is_write_query, _value_sanitize, lit
 
 logger = logging.getLogger("kenning_encounter")
@@ -116,6 +127,11 @@ def _transport_session(ctx: Context) -> str | None:
 
 # -- Server Factory -----------------------------------------------------------
 
+# Reconcile sweep: compressions in flight at once, and nodes per sidecar
+# write. Eight in flight is far inside every provider tier this has run on.
+_RECONCILE_CONCURRENCY = 8
+_RECONCILE_BATCH = 50
+
 class ReconcileRetry:
     """Re-runs the sidecar reconcile once the matcher's backend recovers.
 
@@ -176,14 +192,18 @@ def create_mcp_server(
     read_timeout: int = 30,
     infuse_frontier_bias: float = 0.3,
     infuse_refresh_turns: int = 10,
-    matcher_api_key: str = "",
-    matcher_endpoint: str = "https://generativelanguage.googleapis.com/v1beta",
-    matcher_model: str = "gemini-3.5-flash-lite",
+    voices: list[Voice] | None = None,
+    matcher_lead: str = "gemini",
     matcher_timeout_ms: int = 5000,
     matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
-    reconcile_retry: ReconcileRetry | None = None,
+    matcher_cooldown_s: float = 300.0,
+    matcher_shadow: bool = False,
+    matcher_shadow_log: str = "models/matcher-shadow.jsonl",
+    reconcile_retries: dict[str, ReconcileRetry] | None = None,
     stateless_http: bool = False,
+    profile: str = "full",
+    reader_hide_loci: list[str] | None = None,
 ) -> FastMCP:
     """Create an MCP server instance for Kenning Encounter."""
 
@@ -193,16 +213,59 @@ def create_mcp_server(
     # release was running.
     mcp: FastMCP = FastMCP("kenning-encounter", version=_SERVER_VERSION)
 
-    meaning_index = MeaningIndex(matcher_sidecar)
+    # One sidecar per voice, each bound to the voice that writes it.
+    if voices is None:
+        voices = [Voice("gemini", DEFAULT_MODELS["gemini"])]
+    indexes: dict[str, MeaningIndex] = {
+        v.id: MeaningIndex(sidecar_path(matcher_sidecar, v), v.id) for v in voices
+    }
+    health = VoiceHealth(cooldown_s=matcher_cooldown_s)
+    retries = reconcile_retries or {}
     fallback_warned: set[str] = set()
 
-    def _prefix_tokens() -> int:
+    def _prefix_tokens(voice_id: str) -> int:
         """Approximate matcher prefix size (chars/4) — what a context window
         is compared against. 0 when the sidecar cannot be read."""
         try:
-            return len(meaning_index.prefix()[0]) // 4
-        except MeaningUnavailable:
+            return len(indexes[voice_id].prefix()[0]) // 4
+        except (MeaningUnavailable, KeyError):
             return 0
+
+    def _candidates(order: list[Voice]) -> list[tuple[Voice, MeaningIndex]]:
+        return [(v, indexes[v.id]) for v in order]
+
+    def _append_shadow(record: dict[str, Any]) -> None:
+        try:
+            path = Path(matcher_shadow_log)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning(f"matcher shadow log not written: {e}")
+
+    async def _shadow_match(
+        match_id: str, session_id: str | None, delivered: dict[str, Any],
+        others: list[Voice], traj_text: str,
+    ) -> None:
+        """The non-delivering voices match the same trajectory, after the
+        turn has its payload. Logged, never delivered. A shadow failure
+        cools its voice like any other failure — it is real evidence."""
+        for v in others:
+            index = indexes[v.id]
+            try:
+                prefix, names = index.prefix()
+                m = await match_meanings(
+                    prefix, names, traj_text, matcher_top_n, v,
+                    timeout_ms=max(matcher_timeout_ms, 10_000),
+                )
+                health.ok(v.id)
+                summary = voice_summary(v, m, index)
+            except MeaningUnavailable as e:
+                health.failed(v.id)
+                summary = voice_summary(v, None, index, error=str(e))
+            _append_shadow(shadow_record(
+                match_id, session_id, matcher_lead, delivered, summary,
+            ))
 
     async def _sidecar_meaning_make(nodes: list[dict[str, Any]]) -> None:
         """The on-write trigger: compress newly created/edited nodes into
@@ -213,31 +276,39 @@ def create_mcp_server(
         logged and left for the startup reconcile sweep to retry; the node
         stays reachable through the lexical fallback path meanwhile.
         Writes ONLY the sidecar file — never Neo4j."""
-        try:
-            known = meaning_index.known_nodes()
-            entries: dict[str, dict[str, Any]] = {}
-            for n in nodes:
-                h = content_hash(n["name"], n.get("description") or "")
-                prev = known.get(n["name"])
-                if prev and prev.get("hash") == h and prev.get("meaning"):
-                    continue
-                meaning = await compress_meaning(
-                    n, matcher_api_key, matcher_model, matcher_endpoint
+        # Every configured voice keeps its own sidecar current, each on its
+        # own: one voice's outage defers only its own entries.
+        for voice in voices:
+            if not voice.configured:
+                continue
+            index = indexes[voice.id]
+            retry = retries.get(voice.id)
+            try:
+                known = index.known_nodes()
+                entries: dict[str, dict[str, Any]] = {}
+                for n in nodes:
+                    h = content_hash(n["name"], n.get("description") or "")
+                    prev = known.get(n["name"])
+                    if prev and prev.get("hash") == h and prev.get("meaning"):
+                        continue
+                    meaning = await compress_meaning(n, voice)
+                    entries[n["name"]] = {
+                        "type": n.get("type", "?"), "hash": h, "meaning": meaning,
+                    }
+                if entries:
+                    index.upsert(entries)
+                    logger.info(
+                        f"sidecar {voice.id}: meaning-made {len(entries)} "
+                        "node(s) on write"
+                    )
+                    if retry:
+                        retry.recovered()
+            except Exception as e:
+                logger.warning(
+                    f"sidecar {voice.id}: on-write compression deferred: {e}"
                 )
-                entries[n["name"]] = {
-                    "type": n.get("type", "?"), "hash": h, "meaning": meaning,
-                }
-            if entries:
-                meaning_index.upsert(entries)
-                logger.info(
-                    f"sidecar: meaning-made {len(entries)} node(s) on write"
-                )
-                if reconcile_retry:
-                    reconcile_retry.recovered()
-        except Exception as e:
-            logger.warning(f"sidecar on-write compression deferred: {e}")
-            if reconcile_retry:
-                reconcile_retry.owe()
+                if retry:
+                    retry.owe()
 
     # -- Process Layer (the guarded spine) ------------------------------------
 
@@ -488,10 +559,11 @@ def create_mcp_server(
         """
         async with _tool_errors("delete_entities"):
             result = await kenning_encounter.delete_entities(names)
-            try:
-                meaning_index.remove(names)
-            except Exception as e:
-                logger.warning(f"sidecar removal deferred: {e}")
+            for vid, index in indexes.items():
+                try:
+                    index.remove(names)
+                except Exception as e:
+                    logger.warning(f"sidecar {vid}: removal deferred: {e}")
             return _json_result(result)
 
     # -- Relation Tools (coherence layer) -------------------------------------
@@ -1154,36 +1226,64 @@ def create_mcp_server(
             # is deliberate — the governors were tuned at that scale.
             seed_matches: list[dict[str, Any]] | None = None
             selection_meta: dict[str, Any] | None = None
+            # The voices in this call's order: the lead first (per locus
+            # under 'alternate'), then the fallbacks. match_id joins this
+            # infusion's observe-log line to its shadow-log line.
+            order = voice_order(voices, matcher_lead, session_id)
+            lead_id = order[0].id if order else ""
+            match_id = new_match_id()
+            traj_text, traj_meta = assemble_trajectory(trajectory or [], text)
             try:
-                prefix, ordered_names = meaning_index.prefix()
-                traj_text, traj_meta = assemble_trajectory(
-                    trajectory or [], text
-                )
-                matched = await match_meanings(
-                    prefix, ordered_names, traj_text, matcher_top_n,
-                    matcher_api_key, matcher_model, matcher_endpoint,
+                matched = await match_chain(
+                    _candidates(order), traj_text, matcher_top_n, health,
                     timeout_ms=matcher_timeout_ms,
                 )
+                voice: Voice = matched["voice"]
+                index: MeaningIndex = matched["index"]
                 k = len(matched["selections"])
                 seed_matches = [
                     {
                         "name": s["name"],
-                        "type": meaning_index.node_type(s["name"]),
+                        "type": index.node_type(s["name"]),
                         "score": float(k - i) / k,
                     }
                     for i, s in enumerate(matched["selections"])
                 ]
                 selection_meta = {
                     "channel": "meaning",
+                    "match_id": match_id,
+                    "lead": lead_id,
+                    "voice": voice.id,
+                    "attempts": matched["attempts"],
                     "ms": matched["ms"],
                     "prompt_tokens": matched["prompt_tokens"],
                     "cached_tokens": matched["cached_tokens"],
                     "trajectory": traj_meta,
-                    "sidecar_size": meaning_index.size,
+                    "sidecar_size": index.size,
                 }
                 fallback_warned.clear()  # a recurrence after recovery re-warns
-                if reconcile_retry:
-                    reconcile_retry.recovered()
+                retry = retries.get(voice.id)
+                if retry:
+                    retry.recovered()
+                for a in matched["attempts"]:
+                    if "error" in a and a["error"] not in fallback_warned:
+                        fallback_warned.add(a["error"])
+                        logger.warning(
+                            "matcher voice %s unavailable, %s matched: %s",
+                            a["voice"], voice.id, a["error"],
+                        )
+                if matcher_shadow:
+                    others = [
+                        v for v in voices
+                        if v.id != voice.id and v.configured
+                        and not health.cooling(v.id)
+                    ]
+                    if others:
+                        asyncio.create_task(_shadow_match(
+                            match_id, session_id,
+                            voice_summary(voice, matched, index),
+                            others, traj_text,
+                        ))
             except MeaningUnavailable as e:
                 # Fallback is a reported result, not an error: the
                 # lexical path below is the pre-v0.9.0 behaviour. It is
@@ -1192,15 +1292,22 @@ def create_mcp_server(
                 # (matcher_fallback_note). Reason text is exception shape.
                 selection_meta = {
                     "channel": "lexical_fallback",
+                    "match_id": match_id,
+                    "lead": lead_id,
+                    "attempts": e.attempts,
                     "fallback_reason": str(e),
                 }
                 if str(e) not in fallback_warned:
                     fallback_warned.add(str(e))
                     logger.warning(
                         "meaning matcher unavailable — infusion seeds are "
-                        "LEXICAL until this clears: %s (sidecar %d nodes, "
-                        "prefix ~%d tokens)",
-                        e, meaning_index.size, _prefix_tokens(),
+                        "LEXICAL until this clears: %s (%s)",
+                        e,
+                        ", ".join(
+                            f"{v.id} sidecar {indexes[v.id].size} nodes, "
+                            f"prefix ~{_prefix_tokens(v.id)} tokens"
+                            for v in order
+                        ),
                     )
             result = await kenning_encounter.infuse(
                 text=text,
@@ -1276,6 +1383,15 @@ def create_mcp_server(
                 "fallback; bare numbers run ~1.2s. Use only at small top_n."
             ),
         ),
+        voice: str | None = Field(
+            default=None,
+            description=(
+                "Run ONE matcher voice by provider ('gemini' or 'openai'), "
+                "against that voice's own sidecar, with no fallback — how "
+                "two voices are compared on the same cases. Default: the "
+                "configured lead, with the fallback chain."
+            ),
+        ),
     ) -> ToolResult:
         """The meaning matcher's DIAGNOSTIC surface — the T0 instrument, kept.
 
@@ -1314,9 +1430,18 @@ def create_mcp_server(
             sidecar_size: int | None = None
             fallback = False
             fallback_reason: str | None = None
+            voice_id: str | None = None
+            index: MeaningIndex | None = None
             try:
-                prefix, ordered_names = meaning_index.prefix()
-                sidecar_size = meaning_index.size
+                if voice:
+                    order = [v for v in voices if v.provider == voice.strip().lower()]
+                    if not order:
+                        raise MeaningUnavailable(
+                            f"no matcher voice for provider {voice!r} "
+                            f"(configured: {', '.join(v.id for v in voices)})"
+                        )
+                else:
+                    order = voice_order(voices, matcher_lead, None)
                 if trajectory is not None:
                     prior = trajectory
                 elif transcript_path and trajectory_turns > 0:
@@ -1331,12 +1456,18 @@ def create_mcp_server(
                 else:
                     prior = []
                 traj_text, traj_meta = assemble_trajectory(prior, text)
-                matched = await match_meanings(
-                    prefix, ordered_names, traj_text, top_n,
-                    matcher_api_key, matcher_model, matcher_endpoint,
+                # A named voice gets the whole budget and no fallback; the
+                # diagnostic must say which voice selected, never substitute.
+                matched = await match_chain(
+                    _candidates(order), traj_text, top_n,
+                    VoiceHealth(cooldown_s=0) if voice else health,
                     timeout_ms=matcher_timeout_ms,
                     include_reasons=include_reasons,
                 )
+                chosen: MeaningIndex = matched["index"]
+                index = chosen
+                voice_id = matched["voice"].id
+                sidecar_size = chosen.size
                 selections = matched["selections"]
                 match_ms = matched["ms"]
                 cached_tokens = matched["cached_tokens"]
@@ -1349,10 +1480,11 @@ def create_mcp_server(
             if fallback:
                 arm = await kenning_encounter.lexical_channel_rank(text, top_n=top_n)
             else:
+                assert index is not None
                 matches = [
                     {
                         "name": s["name"],
-                        "type": meaning_index.node_type(s["name"]),
+                        "type": index.node_type(s["name"]),
                         "score": float(len(selections) - i) / len(selections),
                     }
                     for i, s in enumerate(selections)
@@ -1375,11 +1507,13 @@ def create_mcp_server(
                 cached_tokens=cached_tokens, prompt_tokens=prompt_tokens,
                 sidecar_size=sidecar_size,
                 fallback=fallback, fallback_reason=fallback_reason,
+                voice=voice_id,
             )
             return _text_result(
                 report,
                 structured={
                     "result": {
+                        "voice": voice_id,
                         "selections": selections,
                         "candidates": arm["candidates"],
                         "trajectory": traj_meta,
@@ -1415,6 +1549,32 @@ def create_mcp_server(
         """Serve the canonical Kenning Encounter HOWTO from inside the installed package."""
         return _HOWTO_PATH.read_text(encoding="utf-8")
 
+    if profile == "reader":
+        # The read-only face every harness but the trajectory's own gets
+        # (reader.py). Enforced as middleware so it is an allowlist over
+        # EVERY tool, present and future, and so every result passes the
+        # withheld-loci filter when an experiment names loci to withhold.
+        loci = list(reader_hide_loci or [])
+
+        async def _hidden_names() -> frozenset[str]:
+            if not loci:
+                return frozenset()
+            res = await kenning_encounter.driver.execute_query(
+                HIDDEN_QUERY, {"loci": loci}, routing_=RoutingControl.READ,
+            )
+            if not res.records:
+                raise ValueError("withheld-loci query returned no row")
+            row = res.records[0]
+            found = list(row["loci"])
+            if len(set(found)) != len(set(loci)):
+                missing = sorted(set(loci) - set(found))
+                raise ValueError(f"withheld loci not in the graph: {missing}")
+            return frozenset([*found, *(n for n in row["names"] if n)])
+
+        mcp.add_middleware(ReaderMiddleware(
+            frozenset(ns + t for t in READER_TOOLS), _hidden_names,
+        ))
+
     return mcp
 
 
@@ -1441,7 +1601,16 @@ async def main(
     matcher_timeout_ms: int = 5000,
     matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
+    matcher_openai_api_key: str = "",
+    matcher_openai_model: str = "gpt-6-luna",
+    matcher_openai_endpoint: str = "https://api.openai.com/v1",
+    matcher_lead: str = "gemini",
+    matcher_cooldown_s: int = 300,
+    matcher_shadow: bool = False,
+    matcher_shadow_log: str = "models/matcher-shadow.jsonl",
     stateless_http: bool = False,
+    server_profile: str = "full",
+    reader_hide_loci: list[str] | None = None,
 ) -> None:
     logger.info("Starting Kenning Encounter MCP Server")
     logger.info(f"Connecting to Neo4j at: {neo4j_uri}")
@@ -1479,11 +1648,30 @@ async def main(
     # two together are what makes the sidecar automatic rather than a
     # human's chore. Writes only the sidecar file; the graph is read-only
     # to this entire path.
-    reconcile_retry = ReconcileRetry()
+    # The Gemini voice is always present (keyless it reports itself
+    # unconfigured, as before v0.17.0); the OpenAI voice exists only with a
+    # key, so a deployment that never set one sees nothing new.
+    voices = [Voice("gemini", matcher_model, matcher_api_key, matcher_endpoint)]
+    if matcher_openai_api_key:
+        voices.append(Voice(
+            "openai", matcher_openai_model, matcher_openai_api_key,
+            matcher_openai_endpoint,
+        ))
+    logger.warning(
+        "meaning matcher voices: %s; lead %s; shadow %s",
+        ", ".join(
+            f"{v.id}{'' if v.configured else ' (unconfigured)'}" for v in voices
+        ),
+        matcher_lead, "on" if matcher_shadow else "off",
+    )
+    reconcile_retries = {v.id: ReconcileRetry() for v in voices}
 
-    async def _sidecar_reconcile() -> None:
+    async def _sidecar_reconcile(voice: Voice) -> None:
+        if not voice.configured:
+            return
+        retry = reconcile_retries[voice.id]
         try:
-            index = MeaningIndex(matcher_sidecar)
+            index = MeaningIndex(sidecar_path(matcher_sidecar, voice), voice.id)
             # The process layer is not meaning-bearing and never was: a
             # Locus is an instantiation of the self, not something the self
             # noticed. Derived from PROCESS_TYPES rather than naming a label,
@@ -1494,7 +1682,12 @@ async def main(
                     f"MATCH (n) WHERE {not_process_node('n')} "
                     "AND n.name IS NOT NULL "
                     "RETURN n.name AS name, labels(n)[0] AS type, "
-                    "       coalesce(n.description, '') AS description"
+                    "       coalesce(n.description, '') AS description "
+                    # A fixed order: a voice's sidecar is numbered in the
+                    # order this sweep writes it, so two voices built from
+                    # empty land in the same creation order instead of
+                    # whatever order the store returned.
+                    "ORDER BY n.t_created, n.name"
                 ),
                 routing_=RoutingControl.READ,
             )
@@ -1512,27 +1705,46 @@ async def main(
             # named it, writing the whole corpus into `docker logs` on a
             # keyless start.
             deferred: dict[str, int] = {}
-            for n in to_compress:
-                try:
-                    meaning = await compress_meaning(
-                        n, matcher_api_key, matcher_model, matcher_endpoint
-                    )
-                    index.upsert({n["name"]: {
+            # Compressions run a few at a time and are written in batches.
+            # A first build for a new voice is the whole corpus — 1,110
+            # nodes when the second voice arrived — and one call at a time
+            # left that voice's sidecar partial for most of an hour. The
+            # batch is written in corpus order, so the prefix stays in
+            # insertion order.
+            sem = asyncio.Semaphore(_RECONCILE_CONCURRENCY)
+
+            async def _one(n: dict[str, Any]) -> tuple[dict[str, Any], str | Exception]:
+                async with sem:
+                    try:
+                        return n, await compress_meaning(n, voice)
+                    except Exception as e:  # noqa: BLE001 — tallied, never raised
+                        return n, e
+
+            for i in range(0, len(to_compress), _RECONCILE_BATCH):
+                batch = to_compress[i:i + _RECONCILE_BATCH]
+                entries: dict[str, dict[str, Any]] = {}
+                for n, out in await asyncio.gather(*(_one(n) for n in batch)):
+                    if isinstance(out, Exception):
+                        record_deferral(deferred, out)
+                        continue
+                    entries[n["name"]] = {
                         "type": n.get("type", "?"), "hash": n["hash"],
-                        "meaning": meaning,
-                    }})
-                    done += 1
-                except Exception as e:
-                    record_deferral(deferred, e)
+                        "meaning": out,
+                    }
+                if entries:
+                    index.upsert(entries)
+                    done += len(entries)
             if deferred:
-                logger.warning(f"sidecar reconcile: {deferral_summary(deferred)}")
-                reconcile_retry.owe()
+                logger.warning(
+                    f"sidecar reconcile {voice.id}: {deferral_summary(deferred)}"
+                )
+                retry.owe()
             logger.info(
-                f"sidecar reconcile: {done}/{len(to_compress)} compressed, "
-                f"{len(to_remove)} removed, corpus {len(graph_nodes)}"
+                f"sidecar reconcile {voice.id}: {done}/{len(to_compress)} "
+                f"compressed, {len(to_remove)} removed, corpus {len(graph_nodes)}"
             )
         except Exception as e:
-            logger.warning(f"sidecar reconcile failed (non-fatal): {e}")
+            logger.warning(f"sidecar reconcile {voice.id} failed (non-fatal): {e}")
 
     # -- The unmigrated-spine guard (v0.12.2) --------------------------------
     #
@@ -1578,8 +1790,16 @@ async def main(
 
     asyncio.create_task(_spine_guard())
 
-    reconcile_retry.run = _sidecar_reconcile
-    asyncio.create_task(_sidecar_reconcile())
+    if server_profile == "reader":
+        # Read-only face: it maintains no sidecar and calls no provider.
+        logger.warning(
+            "READER PROFILE: read-only allowlist %s; withheld loci: %s",
+            ", ".join(sorted(READER_TOOLS)), ", ".join(reader_hide_loci or []) or "none",
+        )
+    else:
+        for v in voices:
+            reconcile_retries[v.id].run = functools.partial(_sidecar_reconcile, v)
+            asyncio.create_task(_sidecar_reconcile(v))
 
     custom_middleware = [
         Middleware(
@@ -1598,14 +1818,18 @@ async def main(
         kenning_encounter, namespace, read_timeout=read_timeout,
         infuse_frontier_bias=infuse_frontier_bias,
         infuse_refresh_turns=infuse_refresh_turns,
-        matcher_api_key=matcher_api_key,
-        matcher_endpoint=matcher_endpoint,
-        matcher_model=matcher_model,
+        voices=voices,
+        matcher_lead=matcher_lead,
         matcher_timeout_ms=matcher_timeout_ms,
         matcher_top_n=matcher_top_n,
         matcher_sidecar=matcher_sidecar,
-        reconcile_retry=reconcile_retry,
+        matcher_cooldown_s=matcher_cooldown_s,
+        matcher_shadow=matcher_shadow,
+        matcher_shadow_log=matcher_shadow_log,
+        reconcile_retries=reconcile_retries,
         stateless_http=stateless_http,
+        profile=server_profile,
+        reader_hide_loci=reader_hide_loci,
     )
 
     try:

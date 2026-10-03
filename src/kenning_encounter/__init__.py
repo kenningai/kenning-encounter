@@ -96,6 +96,66 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--matcher-lead", default=None,
+        choices=["gemini", "openai", "alternate"],
+        help=(
+            "Which matcher voice leads (default: gemini). 'alternate' picks "
+            "the lead per locus from the session id. The other configured "
+            "voice is the fallback"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-openai-model", default=None,
+        help=(
+            "OpenAI matcher voice model (default: gpt-6-luna). The key "
+            "comes from OPENAI_API_KEY, env only; no key -> no OpenAI voice"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-openai-endpoint", default=None,
+        help="OpenAI API base URL (default: https://api.openai.com/v1)",
+    )
+    parser.add_argument(
+        "--matcher-cooldown-s", type=int, default=None,
+        help=(
+            "Seconds a failed matcher voice is tried after the healthy ones "
+            "(default: 300)"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-shadow", action="store_true", default=None,
+        help=(
+            "Also match every prompt with the non-delivering voice, in the "
+            "background, and log the pair (NEO4J_MATCHER_SHADOW)"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-shadow-log", default=None,
+        help=(
+            "Shadow log path (default: matcher-shadow.jsonl beside the "
+            "sidecar)"
+        ),
+    )
+
+    parser.add_argument(
+        "--server-profile", default=None, choices=["full", "reader", "author"],
+        help=(
+            "full (default) or reader: a read-only allowlist of tools for "
+            "every harness but the trajectory's own; author is the v0.18 "
+            "name for reader (NEO4J_MCP_SERVER_PROFILE)"
+        ),
+    )
+    parser.add_argument(
+        "--reader-hide-loci", "--author-hide-loci", dest="reader_hide_loci",
+        default=None,
+        help=(
+            "Comma-separated session ids or 'Locus ...' names whose nodes the "
+            "reader profile withholds, for an experiment; default none "
+            "(NEO4J_READER_HIDE_LOCI)"
+        ),
+    )
+
     args = parser.parse_args()
     config = process_config(args)
     asyncio.run(server.main(**config))

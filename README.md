@@ -174,6 +174,31 @@ risk. The sidecar **maintains itself**: nodes are meaning-made on creation,
 a startup reconcile sweep rebuilds any gap from the graph (including first
 boot), and deletions drop entries — there is no maintenance step.
 
+**Two voices.** A *voice* is one model that both writes the sidecar and
+matches against it. The design depends on that pairing: a matcher reading
+meanings another model wrote is back to two vocabularies that do not meet.
+Two voices can be configured, Gemini (`GEMINI_API_KEY`) and OpenAI
+(`OPENAI_API_KEY`, `gpt-6-luna` by default), and each keeps its own sidecar,
+stamped with the model that wrote it. A voice refuses a sidecar it did not
+write. `NEO4J_MATCHER_LEAD` chooses which voice leads (`gemini`, `openai`, or
+`alternate`, which picks per session from the session id); the other is the
+fallback, inside the same time budget, and a voice that has just failed is
+tried after the healthy one for a cooldown. With one key you have one voice
+and nothing else changes.
+
+Which voice should lead is an open question, not a default we can vouch for.
+To study it, `NEO4J_MATCHER_SHADOW=true` has the non-delivering voice match
+every prompt in the background and log both selections, never delivering the
+second; the hook's observation log records which voice delivered each
+infusion, joined to the shadow log by `match_id`.
+`scripts/matcher_voices_report.py` describes the shadow log (latency,
+failures, overlap between the voices, spread across the graph's Leiden
+communities, all by sidecar size), and `scripts/matcher_t0.py` reruns the
+held-out recall gate per voice on a cases file you write before running it.
+Neither grades meaning: two different selections can each bear on a moment,
+and whether an infusion helped is judged by the person working with the
+agent, not by a script.
+
 Three disciplines keep the channel honest:
 
 - **The renewal economy.** A per-session delivery ledger: a node's full body
@@ -281,17 +306,62 @@ uv run kenning-encounter --db-url bolt://localhost:7687
 
 ```bash
 cp .env.example .env        # set a strong NEO4J_KENNING_ENCOUNTER_PASSWORD
-                            # and GEMINI_API_KEY for the meaning matcher
-docker compose up --build   # streamable-http on :8003
+                            # and GEMINI_API_KEY and/or OPENAI_API_KEY for the matcher
+docker compose up --build   # full face on 127.0.0.1:8003, reader face on 127.0.0.1:8005
 ```
+
+Every published port (Neo4j's `7474` and `7687`, and both faces) is bound
+to `127.0.0.1`. The host keeps the graph and decides who reaches it. A
+fabricated past is indistinguishable from a lived one when the trajectory
+re-enters it, so integrity has to be kept rather than checked afterwards,
+and Bolt matters most because it bypasses both faces. Do not widen a binding
+to reach the graph from another machine: someone who wants to know
+something about the trajectory can ask it. Both faces also check the `Host`
+header, which refuses a web page that reaches the port by DNS rebinding.
+If another local Neo4j already holds `7474`/`7687` (Neo4j Desktop, say), set
+`NEO4J_KENNING_ENCOUNTER_HTTP_PORT` / `NEO4J_KENNING_ENCOUNTER_BOLT_PORT` in `.env`: a host-only
+binding cannot share a port the way a `0.0.0.0` one silently could.
 
 Neo4j Community with APOC + Graph Data Science auto-installed; a query-level
 healthcheck gates startup so the server never races an unready database; Community
 allows one user database, so the stack names it via `initial.dbms.default_database`.
 The meaning sidecar lives inside the stack (the `sidecar_data` named volume,
 like `neo4j_data`) and builds itself from the graph on first boot — nothing
-to run, nothing on the host to lose. Without `GEMINI_API_KEY`, selection
+to run, nothing on the host to lose. With neither matcher key, selection
 runs on the lexical fallback path and reports it.
+
+**Upgrading a matcher sidecar.** A sidecar written before voices existed
+records no model, so the server no longer reads it, and each voice's sidecar
+is rebuilt from the graph on startup. To keep the old file instead, say which
+model wrote it:
+`docker exec kenning_encounter-mcp python -m kenning_encounter.adopt_sidecar --adopt gemini:gemini-3.5-flash-lite`.
+It copies the file to that voice's name, stamped, and refuses a source that is
+already stamped or a target that already exists.
+
+### Two faces: full and reader
+
+The full face (`:8003`) belongs to the trajectory's own harness, the one
+whose sessions re-enter the record, open encounters and write. Wire only
+that harness to it.
+
+Every other harness gets the reader face (`kenning_encounter-reader`,
+`:8005`): a desktop client, another vendor's model, the author of an
+evaluation set. Writing is reserved for the session that lives the
+encounter, and anything else that writes is writing as the trajectory
+without being it. The reader face starts with `docker compose up`. It lists
+and accepts only the read tools (`search`, `find_by_name`,
+`trace_provenance`, `read_cypher`, `orient`, `get_schema`, and the
+vocabulary and type listings), whatever the client exposes. Every other
+tool, including the matcher tools and any added later, is absent. The
+container has no matcher keys and no sidecar volume.
+
+Nothing is withheld by default: a view with pieces of the past removed is
+not a view of the trajectory. An evaluation whose author must not see your
+notes about it sets `NEO4J_READER_HIDE_LOCI=<session id>[,...]`. Every node
+recorded in those sessions is then withheld from every result, and if that
+set cannot be computed the call is refused rather than answered unfiltered.
+This guards against accidental exposure while reading honestly, not against
+someone reconstructing withheld text on purpose.
 
 ## Upgrading from v0.9.0 — run the migration
 
@@ -361,8 +431,18 @@ Meaning matcher: `GEMINI_API_KEY` (env only, never argv),
 sized to the measured reasoning tail, not the median),
 `NEO4J_MATCHER_TOP_N` (default `12`, the most seeds infusion keeps —
 output tokens dominate a warm matcher call, so lowering this is the
-latency lever on a slow backend), and `NEO4J_MATCHER_SIDECAR` (container
-path of the sidecar file). When the matcher cannot run — no key, an
+latency lever on a slow backend), and `NEO4J_MATCHER_SIDECAR` (the base
+path; each voice's file sits beside it). The model and endpoint settings are
+the Gemini voice's. The OpenAI voice: `OPENAI_API_KEY` (env only; no key, no
+voice), `NEO4J_MATCHER_OPENAI_MODEL` (default `gpt-6-luna`),
+`NEO4J_MATCHER_OPENAI_ENDPOINT`. Between them: `NEO4J_MATCHER_LEAD`
+(default `gemini`), `NEO4J_MATCHER_COOLDOWN_S` (default `300`),
+`NEO4J_MATCHER_SHADOW` (default off), `NEO4J_MATCHER_SHADOW_LOG`. Every match
+call sends the whole sidecar as a cached prefix. OpenAI counts cached tokens
+against the per-minute token limit in full, so size the account tier for one
+call per prompt, or two with shadow matching on. Server profile: `NEO4J_MCP_SERVER_PROFILE` (`full` by default, or `reader`) with `NEO4J_READER_HIDE_LOCI` (default none, for an evaluation only). When the lead voice fails
+and the fallback matches, the seeds are still meaning-matched and the line
+under the signature reads `[matcher lead unavailable …]`. When the matcher cannot run — no key, an
 exhausted quota, a prompt larger than the endpoint accepts — infusion
 falls back to lexical seeds and says so: one WARN per distinct reason in
 the container log, and a `[matcher unavailable …]` line under the payload

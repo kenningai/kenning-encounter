@@ -485,6 +485,21 @@ class TestTheWholeHookAgainstAStatelessServer:
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert ctx.startswith("[INFUSION DEGRADED") and ctx.endswith("[p]")
 
+    def test_the_delivering_voice_is_recorded_for_the_observer(self, server, tmp_path):
+        # v0.17.0: in-window judgments are split by the voice that delivered,
+        # and joined to the shadow log by match_id.
+        url, state = server
+        state["result"] = {"selection_channel": "meaning", "payload": "[p]",
+                           "matcher": {"channel": "meaning", "voice": "openai:gpt-6-luna",
+                                       "lead": "gemini:gemini-3.5-flash-lite",
+                                       "match_id": "abc123"}}
+        out = json.loads(self._hook(url, tmp_path).stdout)
+        assert "systemMessage" not in out  # a fallback voice is not degradation
+        rec = json.loads((tmp_path / "o.jsonl").read_text().splitlines()[-1])
+        assert rec["matcher_voice"] == "openai:gpt-6-luna"
+        assert rec["matcher_lead"] == "gemini:gemini-3.5-flash-lite"
+        assert rec["match_id"] == "abc123"
+
     def test_healthy_silence_prints_nothing(self, server, tmp_path):
         url, state = server
         state["result"] = {"selection_channel": "meaning", "payload": ""}

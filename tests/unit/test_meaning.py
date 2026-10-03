@@ -15,6 +15,7 @@ from kenning_encounter.meaning import (
     MEANING_PROMPT,
     MeaningIndex,
     MeaningUnavailable,
+    Voice,
     assemble_trajectory,
     build_prefix,
     compress_meaning,
@@ -388,13 +389,12 @@ class TestSidecarAutomation:
     @pytest.mark.asyncio
     async def test_compress_unconfigured_and_dead_endpoint_collapse(self):
         with pytest.raises(MeaningUnavailable):
-            await compress_meaning({"name": "n"}, api_key="", model="m",
-                                   endpoint="http://x")
+            await compress_meaning({"name": "n"}, Voice("gemini", "m", "", "http://x"))
         with pytest.raises(MeaningUnavailable) as exc:
             await compress_meaning(
                 {"name": "n", "type": "Note", "description": "d"},
-                api_key="k", model="m",
-                endpoint="http://127.0.0.1:9/v1beta", timeout_s=0.3,
+                Voice("gemini", "m", "k", "http://127.0.0.1:9/v1beta"),
+                timeout_s=0.3,
             )
         assert "compress failed" in str(exc.value)
 
@@ -403,16 +403,16 @@ class TestMatchConfigGuard:
     @pytest.mark.asyncio
     async def test_missing_key_raises_unavailable(self):
         with pytest.raises(MeaningUnavailable) as exc:
-            await match_meanings("p", ["a"], "t", 5, api_key="", model="m",
-                                 endpoint="http://x")
+            await match_meanings("p", ["a"], "t", 5, Voice("openai", "m", "", "http://x"))
         assert "not configured" in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_dead_endpoint_collapses_to_unavailable(self):
         with pytest.raises(MeaningUnavailable) as exc:
             await match_meanings(
-                "p", ["a"], "t", 5, api_key="k", model="m",
-                endpoint="http://127.0.0.1:9/v1beta", timeout_ms=300,
+                "p", ["a"], "t", 5,
+                Voice("openai", "m", "k", "http://127.0.0.1:9/v1"),
+                timeout_ms=300,
             )
         assert "match failed" in str(exc.value)
 

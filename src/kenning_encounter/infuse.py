@@ -702,15 +702,41 @@ def matcher_fallback_note(selection_meta: dict[str, Any] | None) -> str | None:
     what the trajectory reads before anything else, so the reason goes there.
     Reason text is exception shape (status, URL, counts), never node content.
     """
-    if not selection_meta or selection_meta.get("channel") != "lexical_fallback":
+    if not selection_meta:
         return None
-    reason = " ".join(str(selection_meta.get("fallback_reason", "")).split())
-    if len(reason) > _FALLBACK_REASON_CHARS:
-        reason = reason[: _FALLBACK_REASON_CHARS - 1] + "…"
+    if selection_meta.get("channel") == "meaning":
+        # v0.17.0: still meaning-matched, but not by the lead voice. Said
+        # without naming either voice: which voice is delivering is the
+        # variable a comparison between voices measures, and the header is
+        # read by the subject of that comparison. The failure is named,
+        # because a lead that has gone dark is the operator's to know.
+        failed = [a for a in selection_meta.get("attempts") or [] if "error" in a]
+        lead, voice = selection_meta.get("lead"), selection_meta.get("voice")
+        if failed:
+            reason = _clip_reason(str(failed[0].get("error", "")))
+        elif lead and voice and lead != voice:
+            # The lead was not even tried: it failed recently and is cooling.
+            reason = "the lead failed recently and is cooling down"
+        else:
+            return None
+        return (
+            "[matcher lead unavailable — seeds below are meaning-matched by "
+            f"the fallback voice: {reason or 'no reason given'}]"
+        )
+    if selection_meta.get("channel") != "lexical_fallback":
+        return None
+    reason = _clip_reason(str(selection_meta.get("fallback_reason", "")))
     return (
         "[matcher unavailable — seeds below are LEXICAL keyword matches, not "
         f"meaning-matched: {reason or 'no reason given'}]"
     )
+
+
+def _clip_reason(reason: str) -> str:
+    reason = " ".join(reason.split())
+    if len(reason) > _FALLBACK_REASON_CHARS:
+        reason = reason[: _FALLBACK_REASON_CHARS - 1] + "…"
+    return reason
 
 
 def format_payload(

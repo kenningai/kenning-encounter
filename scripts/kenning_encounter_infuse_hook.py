@@ -557,6 +557,12 @@ def main() -> int:
         # cutover, stratifiable exactly as A9 stratifies on server_version.
         "selection_channel": result.get("selection_channel"),
         "matcher": result.get("matcher"),
+        # v0.17.0: which voice delivered and which was meant to lead —
+        # the partition every in-window judgment of the two voices is split
+        # by. match_id joins this line to the server's shadow log.
+        "matcher_voice": (result.get("matcher") or {}).get("voice"),
+        "matcher_lead": (result.get("matcher") or {}).get("lead"),
+        "match_id": (result.get("matcher") or {}).get("match_id"),
         "trajectory_turns": len(trajectory),
         "timings_ms": result.get("timings_ms"),
         "payload_chars": len(payload),

@@ -1,6 +1,6 @@
 [project]
 name = "kenning-encounter"
-version = "0.12.2"
+version = "0.13.0"
 description = "An encounter-sequential substrate for a trajectory's own accumulated experience, over Neo4j — integrated temporal causality, authored coherence, and provenance that survives revision"
 readme = "README.md"
 requires-python = ">=3.13"

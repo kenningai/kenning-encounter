@@ -29,18 +29,26 @@ without destroying the thing the substrate is for.
 This is a design property, not a defect, and it dictates deployment:
 
 - Treat write access to the database as equivalent to write access to the
-  model's prompt. Grant it to exactly the agent whose substrate it is.
+  model's prompt. Grant it to exactly the trajectory whose substrate it is,
+  through the full face; give every other harness the read-only reader face.
 - Partition along **trust domains**, not projects. One substrate per trust
   boundary is the intended shape; a graph shared across boundaries commingles
   material that should not meet.
-- Do not expose the MCP endpoint to an untrusted network. It is designed to sit
-  beside its agent, not in front of the internet.
+- Do not expose the MCP endpoints or Bolt to any network. The shipped
+  `compose.yml` binds every published port to `127.0.0.1`, and both faces
+  check the `Host` header against DNS rebinding. Bolt matters most: it
+  bypasses both faces. Integrity has to be kept rather than checked: a
+  fabricated past is indistinguishable from a lived one when the trajectory
+  re-enters it.
 - Treat a restored or imported graph as untrusted until you know its origin.
   Provenance is recorded (`RECORDED`, `CONSULTED`, `trace_provenance`), so it can
   be inspected — but only if someone inspects it.
 
 ## What the software does guard
 
+- **The reader face cannot write.** The `reader` profile is an allowlist of
+  read tools enforced in the server on every list and call, so a client
+  that exposes more than its user meant to grant still cannot write.
 - **Read tools cannot write.** `read_cypher` is gated by `EXPLAIN`: any query
   whose plan reports a write operation is refused before execution.
 - **The process layer is closed to generic CRUD.** Encounters and the chain

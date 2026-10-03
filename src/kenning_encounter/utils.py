@@ -247,6 +247,79 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
         or "models/meaning_sidecar.json"
     )
 
+    # The second voice (v0.17.0): an OpenAI model that compresses its OWN
+    # sidecar and matches against it. The NEO4J_MATCHER_MODEL/_ENDPOINT
+    # family above stays the Gemini voice's, so an existing deployment's
+    # settings keep their meaning. Key from OPENAI_API_KEY, env only; with
+    # no key the voice is simply absent and nothing changes.
+    config["matcher_openai_api_key"] = os.getenv("OPENAI_API_KEY") or ""
+    config["matcher_openai_model"] = (
+        getattr(args, "matcher_openai_model", None)
+        or os.getenv("NEO4J_MATCHER_OPENAI_MODEL")
+        or "gpt-6-luna"
+    )
+    config["matcher_openai_endpoint"] = (
+        getattr(args, "matcher_openai_endpoint", None)
+        or os.getenv("NEO4J_MATCHER_OPENAI_ENDPOINT")
+        or "https://api.openai.com/v1"
+    )
+    # Which voice leads: gemini | openai | alternate (chosen per locus from
+    # the session id, so a comparison between voices can be made in the
+    # window). Unknown values fall back to gemini, the pre-v0.17.0 voice,
+    # rather than refusing to start over a typo in an infusion setting.
+    lead = (
+        getattr(args, "matcher_lead", None)
+        or os.getenv("NEO4J_MATCHER_LEAD")
+        or "gemini"
+    ).strip().lower()
+    if lead not in ("gemini", "openai", "alternate"):
+        logger.warning(
+            f"NEO4J_MATCHER_LEAD={lead!r} is not gemini|openai|alternate; using gemini"
+        )
+        lead = "gemini"
+    config["matcher_lead"] = lead
+    # Seconds a failed voice is tried after the healthy ones instead of first.
+    cd = getattr(args, "matcher_cooldown_s", None)
+    if cd is None:
+        cd = _env_int("NEO4J_MATCHER_COOLDOWN_S")
+    config["matcher_cooldown_s"] = 300 if cd is None else max(0, min(3600, cd))
+    # Shadow matching: every other configured voice also matches each
+    # prompt, in the background, and the pair is logged — never delivered.
+    # Off by default: it costs a second provider call per prompt.
+    sh = getattr(args, "matcher_shadow", None)
+    if sh is None:
+        sh = (os.getenv("NEO4J_MATCHER_SHADOW") or "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+    config["matcher_shadow"] = bool(sh)
+    config["matcher_shadow_log"] = (
+        getattr(args, "matcher_shadow_log", None)
+        or os.getenv("NEO4J_MATCHER_SHADOW_LOG")
+        or str(Path(config["matcher_sidecar"]).with_name("matcher-shadow.jsonl"))
+    )
+
+    # Server profile: "full" (default) or "reader", the read-only face for
+    # every harness but the trajectory's own (reader.py). "author" is the
+    # v0.18 name, kept so older operator instructions still work.
+    # Withholding is opt-in: a reader sees the whole trajectory unless an
+    # experiment names loci to withhold, because a view with pieces of the
+    # past removed is not a view of the trajectory.
+    prof = (
+        getattr(args, "server_profile", None)
+        or os.getenv("NEO4J_MCP_SERVER_PROFILE")
+        or "full"
+    ).strip().lower()
+    if prof == "author":
+        prof = "reader"
+    if prof not in ("full", "reader"):
+        raise SystemExit(f"NEO4J_MCP_SERVER_PROFILE={prof!r} is not full|reader")
+    config["server_profile"] = prof
+    from .reader import locus_names
+    hide = (getattr(args, "reader_hide_loci", None)
+            or os.getenv("NEO4J_READER_HIDE_LOCI")
+            or os.getenv("NEO4J_AUTHOR_HIDE_LOCI") or "").strip()
+    config["reader_hide_loci"] = [] if hide.lower() in ("", "none") else locus_names(hide)
+
     # Streamable-HTTP sessions: stateful by default, stateless on opt-in.
     # v0.3.0 made them always stateful because the transport session WAS the
     # locus key. Since v0.12.0 the locus identity is the harness session id,

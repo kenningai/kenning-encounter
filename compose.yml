@@ -1,10 +1,17 @@
 name: kenning_encounter
 
-# A single semantic-experience unit: Neo4j (the substrate) + Kenning Encounter MCP server
-# (the writer/reader). Kenning Encounter talks to Neo4j over the internal Docker network
-# (bolt://neo4j:7687, service-name DNS); the published 7474/7687 ports are for
-# external access (Neo4j Browser, external Bolt clients) and are NOT needed for
-# Kenning Encounter -> Neo4j path.
+# A single semantic-experience unit: Neo4j (the substrate), Kenning Encounter MCP server
+# (the trajectory's own face, read and write) and the reader face (read-only,
+# for every other harness). Both faces talk to Neo4j over the internal Docker
+# network (bolt://neo4j:7687, service-name DNS).
+#
+# EVERY PUBLISHED PORT IS BOUND TO 127.0.0.1. The host is the custodian and
+# the gatekeeper: nothing off this machine can read the trajectory, and
+# nothing can write it except through the full face. A fabricated past is
+# indistinguishable from a lived one at re-entry, so integrity cannot be
+# checked afterwards; it has to be kept. Someone else who wants to know
+# something about the trajectory asks it, through whoever keeps the host.
+# Do not widen a binding to 0.0.0.0 to reach this from another machine.
 #
 # Requires NEO4J_KENNING_ENCOUNTER_PASSWORD in the environment or a .env file (see .env.example).
 
@@ -13,8 +20,15 @@ services:
     image: neo4j:2026.04.0          # Community Edition (no -enterprise suffix); latest calendar release
     container_name: kenning_encounter-neo4j
     ports:
-      - "7474:7474"                 # HTTP / Neo4j Browser
-      - "7687:7687"                 # Bolt
+      # Bolt bypasses both faces (no allowlist, no guarded writer), so it is
+      # the one binding that matters most. Host-only, for Neo4j Browser and
+      # cypher-shell on this machine. The host ports are overridable because
+      # a host-only binding cannot share a port with another local Neo4j
+      # (Neo4j Desktop, say), where a 0.0.0.0 binding silently could: then
+      # localhost reached the OTHER database and only the network reached
+      # this one.
+      - "127.0.0.1:${NEO4J_KENNING_ENCOUNTER_HTTP_PORT:-7474}:7474"   # HTTP / Neo4j Browser
+      - "127.0.0.1:${NEO4J_KENNING_ENCOUNTER_BOLT_PORT:-7687}:7687"   # Bolt
     environment:
       NEO4J_AUTH: "neo4j/${NEO4J_KENNING_ENCOUNTER_PASSWORD}"
 
@@ -42,11 +56,8 @@ services:
       NEO4J_server_memory_heap_initial__size: "1G"
       NEO4J_server_memory_heap_max__size: "2G"
 
-      # Listen on all interfaces so the published ports work. For REMOTE Browser
-      # access (a client not on this host), also set the advertised addresses to
-      # this host's reachable address, e.g.:
-      #   NEO4J_server_bolt_advertised__address: "your.host:7687"
-      #   NEO4J_server_http_advertised__address: "your.host:7474"
+      # Listen on all of the CONTAINER's interfaces so Docker's port publishing
+      # can reach it; what the host exposes is set by the bindings above.
       NEO4J_server_default__listen__address: "0.0.0.0"
     volumes:
       - neo4j_data:/data
@@ -67,13 +78,13 @@ services:
 
   kenning_encounter:
     build: .
-    image: kenning-encounter:0.12.2
+    image: kenning-encounter:0.13.0
     container_name: kenning_encounter-mcp
     depends_on:
       neo4j:
         condition: service_healthy   # wait until Neo4j answers queries, not just opens the port
     ports:
-      - "8003:8000"                  # streamable-http MCP surface
+      - "127.0.0.1:8003:8000"        # the full face: the trajectory's own harness only
     environment:
       NEO4J_URI: "bolt://neo4j:7687" # internal Docker DNS — no published port needed for this hop
       NEO4J_USERNAME: "neo4j"
@@ -83,7 +94,9 @@ services:
       NEO4J_MCP_SERVER_HOST: "0.0.0.0"
       NEO4J_MCP_SERVER_PORT: "8000"
       NEO4J_MCP_SERVER_PATH: "/api/mcp/"
-      NEO4J_MCP_SERVER_ALLOWED_HOSTS: "*"
+      # Host-header check: refuses a request that reached the port by DNS
+      # rebinding (a web page in a browser on this host, posing as local).
+      NEO4J_MCP_SERVER_ALLOWED_HOSTS: "localhost,127.0.0.1"
       # Opt-in: no MCP sessions, so a restart leaves nothing stale for a
       # client or bridge to hold. Every locus-scoped call must then pass
       # session_id. Default off.
@@ -97,41 +110,87 @@ services:
       # Hand-set until measurement places it at the knee of the attenuation
       # curve. Do not tune by feel — that is the whole point.
       NEO4J_INFUSE_REFRESH_TURNS: "10"
-      # The meaning matcher (v0.9.0) — infuse's seed source
-      # (measured in at T0: recall 7/8 vs the 2/8 lexical baseline,
-      # trajectory +2). GEMINI_API_KEY rides in from .env (compose
-      # auto-loads it); no key -> infuse falls back to the lexical
-      # Extract->Match path and reports it. The sidecar of compressed node
-      # meanings is built on the host by scripts/build_meaning_sidecar.py
-      # (incremental; rerun after write-heavy sessions) and rides in
-      # through the read-only ./models mount; the server reloads it on
-      # mtime change, so a host-side rebuild reaches the container without
-      # a restart. Sidecar only — never node properties; nothing written
-      # to Neo4j. Timeout 5000ms is deliberate and measured: the
-      # arc-dependent cases that justify the mechanism take ~3.5s of
-      # reasoning, and a cap that cuts the tail kills exactly the calls
-      # buying the most.
+      # The meaning matcher — infuse's seed source (measured in at T0:
+      # recall 7/8 vs the 2/8 lexical baseline, trajectory +2). Keys ride
+      # in from .env (compose auto-loads it); with no key at all, infuse
+      # falls back to the lexical Extract->Match path and says so.
+      #
+      # VOICES (v0.17.0). A voice is one model that both compresses the
+      # node meanings and matches against them, and each keeps its own
+      # sidecar, stamped by the voice that wrote it and refused by any
+      # other. GEMINI_API_KEY enables the Gemini voice, OPENAI_API_KEY the
+      # OpenAI one. NEO4J_MATCHER_LEAD picks which leads (gemini | openai |
+      # alternate — the last chosen per locus from the session id); the
+      # other is the fallback, in the same 5000 ms budget. A voice that
+      # fails is tried after the healthy one for NEO4J_MATCHER_COOLDOWN_S.
+      # Which voice should lead is not settled: it has not been measured.
+      #
+      # Timeout 5000 ms is deliberate and measured: the arc-dependent cases
+      # that justify the mechanism take ~3.5 s of reasoning, and a cap that
+      # cuts the tail kills exactly the calls buying the most.
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       NEO4J_MATCHER_MODEL: "${NEO4J_MATCHER_MODEL:-gemini-3.5-flash-lite}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      NEO4J_MATCHER_OPENAI_MODEL: "${NEO4J_MATCHER_OPENAI_MODEL:-gpt-6-luna}"
+      NEO4J_MATCHER_LEAD: "${NEO4J_MATCHER_LEAD:-gemini}"
+      NEO4J_MATCHER_COOLDOWN_S: "${NEO4J_MATCHER_COOLDOWN_S:-300}"
       NEO4J_MATCHER_TIMEOUT_MS: "${NEO4J_MATCHER_TIMEOUT_MS:-5000}"
       # Selections per call (max 12 = the seed limit). Output tokens are the
       # dominant cost of a warm call, so this is the latency lever.
       NEO4J_MATCHER_TOP_N: "${NEO4J_MATCHER_TOP_N:-12}"
+      # Base name; each voice's sidecar sits beside it as
+      # meaning_sidecar.<provider>-<model>.json.
       NEO4J_MATCHER_SIDECAR: "/app/models/meaning_sidecar.json"
+      # Shadow matching: the non-delivering voice also matches every
+      # prompt, after the payload is built, and the pair is logged to
+      # /app/models/matcher-shadow.jsonl — never delivered. It costs a
+      # second provider call per prompt (at OpenAI, cached prefix tokens
+      # count against the per-minute limit in full). Read it with
+      # scripts/matcher_voices_report.py.
+      NEO4J_MATCHER_SHADOW: "${NEO4J_MATCHER_SHADOW:-false}"
     volumes:
-      # The meaning sidecar lives INSIDE the stack, like neo4j_data — a
+      # The meaning sidecars live INSIDE the stack, like neo4j_data — a
       # named volume, not a host file, so nothing on the host (cleanup
-      # jobs, path conventions, curious hands) can touch it and the whole
-      # Kenning Encounter is one `docker compose up`. It is a derived, self-healing
-      # cache: the server meaning-makes new nodes into it on write and a
-      # startup reconcile sweep rebuilds any gap — up to the entire file —
-      # from the graph. Inspect with:
-      #   docker exec kenning_encounter-mcp cat /app/models/meaning_sidecar.json
+      # jobs, path conventions, curious hands) can touch them and the whole
+      # Kenning Encounter is one `docker compose up`. Each is a derived, self-healing
+      # cache: the server meaning-makes new nodes into every configured
+      # voice's sidecar on write, and a startup reconcile sweep rebuilds any
+      # gap — up to the entire file — from the graph. Inspect with:
+      #   docker exec kenning_encounter-mcp ls /app/models
       - sidecar_data:/app/models
-      # HTTP sessions are always stateful (v0.3.0) — no knob. The session IS
-      # the locus: encounters depend on the states that preceded them, so the
-      # mcp-session-id carries the locus identity and close_encounter /
-      # create_entities implicitly address the encounter THIS session opened.
+    restart: unless-stopped
+
+  # The READER face (v0.19.0; the v0.18 author profile, renamed): the face
+  # every harness but the trajectory's own connects to (a desktop client,
+  # another vendor's model, a test author). Same image and graph as `kenning_encounter`,
+  # but an allowlist of read tools only, enforced in the server whatever the
+  # client exposes: no writes, no matcher, and nothing added later unless
+  # allowed. Nothing is withheld by default; an experiment whose author must
+  # not see its own record sets NEO4J_READER_HIDE_LOCI. No matcher keys and
+  # NO sidecar volume, so no voice's meanings are reachable from here.
+  # Direct reading is for the keeper's own work; anyone else asks.
+  kenning_encounter-reader:
+    build: .
+    image: kenning-encounter:0.13.0
+    container_name: kenning_encounter-reader
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8005:8000"        # the reader face; 8003 is the full face
+    environment:
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_USERNAME: "neo4j"
+      NEO4J_PASSWORD: "${NEO4J_KENNING_ENCOUNTER_PASSWORD}"
+      NEO4J_DATABASE: "kenning-encounter"
+      NEO4J_TRANSPORT: "http"
+      NEO4J_MCP_SERVER_HOST: "0.0.0.0"
+      NEO4J_MCP_SERVER_PORT: "8000"
+      NEO4J_MCP_SERVER_PATH: "/api/mcp/"
+      NEO4J_MCP_SERVER_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      NEO4J_MCP_SERVER_STATELESS: "true"
+      NEO4J_MCP_SERVER_PROFILE: "reader"
+      NEO4J_READER_HIDE_LOCI: "${NEO4J_READER_HIDE_LOCI:-}"
     restart: unless-stopped
 
 volumes:
