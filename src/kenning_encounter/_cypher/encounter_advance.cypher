@@ -79,6 +79,33 @@ MERGE (locus)-[o:OPENED]->(e) ON CREATE SET o.t_created = datetime()
 FOREACH (p IN CASE WHEN pred IS NULL THEN [] ELSE [pred] END |
     MERGE (p)-[r:NEXT_ENCOUNTER]->(e) ON CREATE SET r.t_created = datetime()
 )
+WITH e, locus, pred
+
+// -- 8. THE THREAD (v0.20.0): one tick of the self's clock. -----------------
+//    Every opening, whatever its locus, takes the step-1 lock, so openings
+//    already happen in one total order. Until v0.20.0 that order was thrown
+//    away: NEXT_ENCOUNTER kept it within a locus and nothing kept it across.
+//    NEXT_TICK writes it down, from the STRUCTURAL tail of the thread (the
+//    ticked encounter with no outgoing NEXT_TICK), inside the same lock, so
+//    ties cannot occur however many openings arrive at once, and no clock is
+//    read. NEXT_ENCOUNTER is succession within one attention; NEXT_TICK is
+//    order within the self that spans them. They are different relations,
+//    and neither is derived from the other.
+//
+//    A graph whose history has not been threaded yet holds unticked
+//    encounters, and ticking on top of them would start a second thread
+//    beside the gap. So nothing is ticked until every existing encounter is
+//    (python -m kenning_encounter.migrate_thread), and re-entry says so.
+OPTIONAL MATCH (tt:Encounter)
+  WHERE tt.tick IS NOT NULL AND NOT (tt)-[:NEXT_TICK]->(:Encounter)
+WITH e, locus, pred, tt,
+     EXISTS { MATCH (u:Encounter) WHERE u.tick IS NULL AND u <> e } AS unthreaded
+FOREACH (_ IN CASE WHEN unthreaded THEN [] ELSE [1] END |
+    SET e.tick = coalesce(tt.tick + 1, 0)
+    FOREACH (t IN CASE WHEN tt IS NULL THEN [] ELSE [tt] END |
+        MERGE (t)-[k:NEXT_TICK]->(e) ON CREATE SET k.t_created = datetime()
+    )
+)
 
 RETURN e.name              AS name,
        elementId(e)        AS eid,
@@ -89,4 +116,5 @@ RETURN e.name              AS name,
        elementId(locus)    AS locus_eid,
        locus.session_id    AS session_id,
        coalesce(locus.anonymous, false) AS locus_anonymous,
-       pred IS NULL        AS is_first_of_locus
+       pred IS NULL        AS is_first_of_locus,
+       e.tick              AS tick

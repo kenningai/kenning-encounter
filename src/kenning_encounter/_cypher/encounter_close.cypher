@@ -14,10 +14,28 @@
 // and the open encounter is a graph read. Encounters carrying the
 // historical mark keep it untouched — a record of an era, not a flag to
 // clean up.
+//
+// THE SEAL TAKES THE SPINE LOCK (v0.20.0) and records the latest tick at
+// sealing. An encounter ends at the first of two events: its seal, or the next
+// opening in its locus, after which nothing can reach it. The second kind of
+// end is already placed among the ticks; this places the first. Without the
+// lock a seal could commit between two openings it did not see, so its tick
+// would claim an order that never happened. seal_tick stays null on a graph
+// whose thread has not been migrated yet, rather than guessing.
+OPTIONAL MATCH (genesis:Locus) WHERE NOT (:Locus)-[:NEXT_LOCUS]->(genesis)
+SET genesis.t_exist = genesis.t_exist
+WITH count(genesis) AS _locked
 MATCH (e:Encounter) WHERE elementId(e) = $eid
+OPTIONAL MATCH (tt:Encounter)
+  WHERE tt.tick IS NOT NULL AND NOT (tt)-[:NEXT_TICK]->(:Encounter)
+WITH e, tt
 __set_clause__
+FOREACH (t IN CASE WHEN e.tick IS NULL OR tt IS NULL THEN [] ELSE [tt] END |
+    SET e.seal_tick = t.tick
+)
 RETURN e.name AS name,
        e.t_exist AS t_exist,
        e.t_sealed AS t_sealed,
        e.summary AS summary,
-       e.report AS report
+       e.report AS report,
+       e.seal_tick AS seal_tick

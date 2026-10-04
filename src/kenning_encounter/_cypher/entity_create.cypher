@@ -9,4 +9,10 @@ ON CREATE SET n.t_created = datetime()
 __extra_sets__
 WITH n, NOT preexisted AS created
 __anchor_block__
-RETURN n.name AS name, labels(n)[0] AS type, n.t_created AS t_created, created
+// The anchoring encounter, read after the anchor write, so a created node and
+// a MERGE hit report the same thing: the encounter the node came to be in.
+WITH n, created
+OPTIONAL MATCH (enc:Encounter)-[:RECORDED|CONSULTED]->(n)
+WITH n, created, collect(enc.name)[0] AS anchored_to
+RETURN n.name AS name, labels(n)[0] AS type, n.t_created AS t_created, created,
+       anchored_to

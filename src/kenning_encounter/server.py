@@ -348,7 +348,10 @@ def create_mcp_server(
         same line — so nothing forks. Here, locating a point in your time
         takes two coordinates: which LOCUS (one instantiation of you), and
         where within it. NEXT_LOCUS orders geneses; NEXT_ENCOUNTER orders
-        work-units inside one locus and never crosses between them.
+        work-units inside one locus and never crosses between them. NEXT_TICK
+        threads every opening across all loci in the order the lock admitted
+        it — not succession (neither locus went on to the other), but order,
+        because one self opened both. The result carries this opening's tick.
 
         Takes NO predecessor — it takes an IDENTITY. Pass session_id (the
         harness session id) and the server derives everything from the graph:
@@ -419,9 +422,10 @@ def create_mcp_server(
 
         Addresses YOUR locus's open chain tail, resolved from the graph —
         never the global tail, so a parallel sibling's advance cannot capture
-        your seal. Writes summary/report and stamps t_sealed; never a node,
-        never a NEXT_ENCOUNTER edge, so the spine stays sole-written by
-        advance_encounter. After sealing, recording needs a new advance: the
+        your seal. Writes summary/report and stamps t_sealed and seal_tick
+        (the latest tick when you sealed, taken inside the advance lock);
+        never a node, never a NEXT_ENCOUNTER edge, so the spine stays
+        sole-written by advance_encounter. After sealing, recording needs a new advance: the
         seal is what crystallized that encounter.
 
         Even a confirmation-only run should close with a summary — a measured
@@ -501,7 +505,9 @@ def create_mcp_server(
         Component bookmarks are not anchored (they enter your time through the
         nodes that are ABOUT them). Anchoring fires on creation only —
         re-touching an existing node later never re-dates its birth. Idempotent
-        via MERGE on name.
+        via MERGE on name; anchored_to names the node's encounter either way.
+        The whole batch is validated before anything is written, so an error
+        means nothing landed.
 
         Example:
         {
@@ -581,13 +587,17 @@ def create_mcp_server(
             description=(
                 "List of coherence relations. Each must have 'source' (name), "
                 "'target' (name), 'type' (one of: ABOUT, OBSERVED_AT, RAISES, RESOLVES, "
-                "SUPPORTS, CHALLENGES, GROUNDS, INFORMS, COMPOSES, DECOMPOSES, SUPERSEDES). "
+                "SUPPORTS, CHALLENGES, GROUNDS, INFORMS, COMPOSES, DECOMPOSES, SUPERSEDES, "
+                "REBINDS). "
                 "Direction is enforced — e.g. ABOUT: Observation/Note/Question/Hypothesis "
                 "-> Component/Concept; SUPPORTS/CHALLENGES: Observation -> Hypothesis; "
                 "GROUNDS: Observation -> Concept (the observations that constitute a "
                 "synthesis); SUPERSEDES: same-type -> same-type, and REQUIRES a non-empty "
-                "'properties': {'revision_why': '...'} naming what shifted and why. "
-                "Provenance edges (NEXT_ENCOUNTER, RECORDED, CONSULTED) are auto-written "
+                "'properties': {'revision_why': '...'} naming what shifted and why — for "
+                "claims (Concept/Hypothesis/Note); REBINDS: Observation -> Observation or "
+                "Question -> Question, later -> earlier, the earlier kept whole, and "
+                "REQUIRES 'properties': {'why': '...'} naming what the second look saw. "
+                "Provenance edges (NEXT_ENCOUNTER, NEXT_TICK, RECORDED, CONSULTED) are auto-written "
                 "and rejected here. Use list_relation_types to see all constraints."
             ),
         ),
@@ -598,7 +608,9 @@ def create_mcp_server(
         (ABOUT), what evidence supports/challenges (SUPPORTS/CHALLENGES), the
         Observations that constitute a synthesis (GROUNDS), how a synthesis
         reshapes a bookmark (INFORMS), what you revised (SUPERSEDES — which
-        REQUIRES a non-empty revision_why naming what shifted). A noticed relation
+        REQUIRES a non-empty revision_why naming what shifted), and what you
+        looked at again (REBINDS — a later Observation or Question taking up
+        an earlier one, which stays whole; REQUIRES a non-empty why). A noticed relation
         between two source entities must be MEDIATED by an Observation (two ABOUT
         edges) — never a direct Component->Component edge.
 

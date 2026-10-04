@@ -79,10 +79,10 @@ class TestRelationTypeEnum:
             assert rt.value in RELATION_SCHEMAS, f"Missing schema for {rt.value}"
 
     def test_enum_count(self):
-        # 6 provenance (NEXT_LOCUS + OPENED added in v0.12.0; the retired
-        # INSTANTIATED_AFTER is kept, because 138 of its edges exist and
-        # nothing is deleted) + 11 coherence.
-        assert len(RelationType) == 17
+        # 7 provenance (NEXT_LOCUS + OPENED added in v0.12.0, NEXT_TICK in
+        # v0.20.0; the retired INSTANTIATED_AFTER is kept, because 138 of its
+        # edges exist and nothing is deleted) + 12 coherence (REBINDS, v0.20.0).
+        assert len(RelationType) == 19
 
     def test_process_edges_are_relation_types(self):
         for e in PROCESS_EDGES:
@@ -120,10 +120,11 @@ class TestReentryGradient:
         # The exact set the gradient query excludes via $process_edges.
         # NEXT_LOCUS and OPENED joined in v0.12.0; INSTANTIATED_AFTER is
         # retired but stays, because its edges are not deleted and must
-        # keep being excluded from every coherence read.
+        # keep being excluded from every coherence read. NEXT_TICK (v0.20.0)
+        # is the thread: written by the advance, never authored.
         assert PROCESS_EDGES == {
-            "NEXT_LOCUS", "OPENED", "NEXT_ENCOUNTER", "INSTANTIATED_AFTER",
-            "RECORDED", "CONSULTED",
+            "NEXT_LOCUS", "OPENED", "NEXT_ENCOUNTER", "NEXT_TICK",
+            "INSTANTIATED_AFTER", "RECORDED", "CONSULTED",
         }
 
     def test_coherence_edges_are_the_nonprocess_complement(self):
@@ -272,6 +273,69 @@ class TestEntityValidation:
 
 
 # -- Relation Validation Tests ------------------------------------------------
+
+class TestRebinds:
+    """v0.20.0. Noticings and questions are rebound, not superseded."""
+
+    def test_rebinds_takes_observations_and_questions_same_type(self):
+        for t in ("Observation", "Question"):
+            assert validate_relation("REBINDS", t, t, {"why": "w"}) == {"why": "w"}
+
+    def test_rebinds_refuses_mixed_types_and_claims(self):
+        with pytest.raises(ValueError):
+            validate_relation("REBINDS", "Observation", "Question", {"why": "w"})
+        for t in ("Concept", "Hypothesis", "Note"):
+            with pytest.raises(ValueError):
+                validate_relation("REBINDS", t, t, {"why": "w"})
+
+    def test_rebinds_requires_a_nonempty_why(self):
+        with pytest.raises(ValueError):
+            validate_relation("REBINDS", "Question", "Question", {})
+        with pytest.raises(ValueError):
+            validate_relation("REBINDS", "Question", "Question", {"why": "  "})
+
+    def test_supersedes_is_unchanged_for_claims(self):
+        assert RELATION_SCHEMAS["SUPERSEDES"]["source_types"] == {"Hypothesis", "Concept", "Note"}
+
+    def test_next_tick_is_a_process_edge(self):
+        assert "NEXT_TICK" in PROCESS_EDGES
+
+
+class TestLiveClaim:
+    """v0.20.1. Every directive read takes only the head of a supersession
+    chain and skips closed statuses; mass reads keep the whole graph."""
+
+    pytestmark = pytest.mark.asyncio
+
+    def test_the_predicate_reads_structure_and_status(self):
+        from kenning_encounter.kenning_encounter import live_claim
+        p = live_claim("h")
+        assert "NOT ()-[:SUPERSEDES]->(h)" in p
+        assert "'retired'" in p and "'falsified'" in p
+
+    async def test_every_frontier_claim_cut_uses_it(self):
+        kenning_encounter = Neo4jKenningEncounter(FakeDriver())  # type: ignore[arg-type]
+        await kenning_encounter._frontier()
+        claim_queries = [q for q, _ in kenning_encounter.driver.calls
+                         if "(h:Hypothesis)" in q or "(c:Concept)" in q]
+        assert len(claim_queries) == 4    # untested, ungrounded, dissonance, contested
+        for q in claim_queries:
+            assert "-[:SUPERSEDES]->" in q, q[:80]
+
+    async def test_conflicts_skip_closed_claims(self):
+        kenning_encounter = Neo4jKenningEncounter(FakeDriver())  # type: ignore[arg-type]
+        await kenning_encounter._conflicts_among(["x"])
+        assert len(kenning_encounter.driver.calls) == 2
+        for q, _ in kenning_encounter.driver.calls:
+            assert "-[:SUPERSEDES]->" in q
+
+    def test_mass_projection_does_not_filter_supersession(self):
+        """The constitutive half keeps what was revised past."""
+        from kenning_encounter.kenning_encounter import coherence_projection_parts
+        rel_filter, src, tgt = coherence_projection_parts()
+        assert "SUPERSEDES" in rel_filter
+        assert "status" not in src + tgt
+
 
 class TestRelationValidation:
     def test_about_observation_to_component(self):
@@ -459,7 +523,7 @@ _ADVANCE_RECORD = {
     "name": "E1", "eid": "eid-1", "t_exist": None, "t_created": None,
     "predecessor": None, "locus": "Locus L-A", "locus_eid": "leid-A",
     "session_id": "sess-A", "locus_anonymous": False,
-    "is_first_of_locus": True,
+    "is_first_of_locus": True, "tick": 0,
 }
 
 
@@ -595,6 +659,35 @@ class TestLocusSpine:
     def test_advance_cypher_no_longer_writes_the_retired_genesis_binding(self):
         assert "INSTANTIATED_AFTER" not in _advance_cypher()
 
+    def test_the_thread_is_written_from_its_structural_tail_inside_the_lock(self):
+        """v0.20.0. The tick comes from the tail found by structure, after the
+        lock, and no clock is read for it."""
+        cy = _advance_cypher()
+        assert cy.index("SET genesis.t_exist = genesis.t_exist") < cy.index("NEXT_TICK")
+        assert "NOT (tt)-[:NEXT_TICK]->(:Encounter)" in cy
+        assert "SET e.tick = coalesce(tt.tick + 1, 0)" in cy
+        assert "ORDER BY" not in cy.upper()
+
+    def test_an_unthreaded_history_blocks_new_ticks(self):
+        assert "u.tick IS NULL" in _advance_cypher()
+
+    def test_the_seal_takes_the_spine_lock_and_records_the_tail_tick(self):
+        cy = _cypher_code("encounter_close", set_clause="SET e.summary = $summary")
+        assert cy.index("SET genesis.t_exist = genesis.t_exist") < cy.index("MATCH (e:Encounter)")
+        assert "SET e.seal_tick = t.tick" in cy
+
+    async def test_a_batch_is_validated_whole_before_any_write(self):
+        kenning_encounter = self._kenning_encounter(extra_script=[
+            (_RESOLVE_OPEN, [{"name": "E1", "eid": "eid-1"}]),
+        ])
+        kenning_encounter._locus_of["mcp-1"] = "leid-A"
+        with pytest.raises(ValueError, match="Nothing was written"):
+            await kenning_encounter.create_entities([
+                {"type": "Note", "name": "ok", "description": "d"},
+                {"type": "Question", "name": "bad", "description": "d", "priority": None},
+            ], mcp_session="mcp-1")
+        assert not [q for q, _ in kenning_encounter.driver.calls if "MERGE (n:" in q]
+
     # -- resolving MY open encounter ----------------------------------------
 
     async def test_open_encounter_is_my_locus_unsealed_tail(self):
@@ -618,7 +711,7 @@ class TestLocusSpine:
         kenning_encounter = self._kenning_encounter(extra_script=[
             (_RESOLVE_OPEN, [{"name": "E1", "eid": "eid-1"}]),
             (_CLOSE, [{"name": "E1", "t_exist": None, "t_sealed": None,
-                       "summary": "x", "report": None}]),
+                       "summary": "x", "report": None, "seal_tick": 0}]),
         ])
         kenning_encounter._locus_of["mcp-1"] = "leid-A"
         await kenning_encounter.close_encounter(summary="x", mcp_session="mcp-1")
@@ -640,7 +733,7 @@ class TestLocusSpine:
         kenning_encounter = self._kenning_encounter(extra_script=[
             (_RESOLVE_OPEN, [{"name": "E1", "eid": "eid-1"}]),
             (_CLOSE, [{"name": "E1", "t_exist": None, "t_sealed": None,
-                       "summary": "s", "report": None}]),
+                       "summary": "s", "report": None, "seal_tick": 0}]),
         ])
         kenning_encounter._locus_of["mcp-1"] = "leid-A"
         out = await kenning_encounter.close_encounter(summary="a " * 400, mcp_session="mcp-1")

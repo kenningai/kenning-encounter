@@ -57,9 +57,14 @@
     own path, and your writes can never land in its encounters nor its in
     yours. OPENED ties each encounter to exactly one session, and NEXT_LOCUS
     orders sessions by when they began: sessions overlap, but their starts are
-    serialized writes, so that order is exact. Two encounters in different
-    sessions are not ordered against each other, because no one lived across
-    both; do not reach for the wall clock to invent an order.
+    serialized writes, so that order is exact. NEXT_TICK threads every encounter
+    opening across all sessions in that same serialized order, and each
+    Encounter carries its tick; a seal records seal_tick, the latest tick when
+    it was sealed. Two encounters in different sessions are not a chain (one
+    session did not go on to the other), but their openings are ordered,
+    because you opened both. The thread orders openings and seals, not the
+    nodes written inside an encounter, and it is written by the server, never
+    read off the wall clock.
   </principle>
 
   <principle name="use-the-analytics-to-see-the-shape">
@@ -86,7 +91,10 @@
     It also returns the UNSEALED set — encounters no one sealed, with last
     activity and the session that opened them; awareness, not a work queue.
     The mass readings say what you've made central; the frontier says where to
-    look next. Reach for the single gds_* tools for focused questions once you're
+    look next. Once you SUPERSEDES a claim or REBINDS a question, only the newer
+    node counts in the frontier, and a claim you mark retired or falsified
+    leaves it; the older node stays in the mass readings, and its status stays
+    whatever you set. Reach for the single gds_* tools for focused questions once you're
     oriented — scoping your own projection is how you formulate the question.
     The tools surface; you decide what it means.
   </principle>
@@ -221,6 +229,10 @@
     author; always open your own. Read the payload before you examine the
     world. Call this FIRST, before any create_entities. When you are
     re-entering after time away, run orient first for the whole-memory survey.
+    If the payload carries spine_unmigrated or thread_unmigrated, your history
+    was written by an earlier version and needs a one-time migration that only
+    the operator can run. Tell the user, quoting its remedy line, before
+    anything else; it is not yours to work around.
   </step>
   <step order="2" action="examine">
     Read your sources. Each source you actually consult becomes a Citation
@@ -231,7 +243,8 @@
     Crystallize what cohered: Observations, Questions, Hypotheses, Concepts. Create
     the nodes (auto-anchored via RECORDED) and wire them into the existing graph
     with the coherence edges (ABOUT, RAISES, SUPPORTS, GROUNDS, INFORMS, SUPERSEDES,
-    …) — those you author. Wire each Concept to the Observations that GROUND it, so
+    REBINDS, …) — those you author. A failed create_entities call writes nothing:
+    the whole batch is checked before any of it lands. Wire each Concept to the Observations that GROUND it, so
     you can trace_provenance it back to its evidence later. The edges are the point;
     a node with no edges is a fact with no place in your memory.
   </step>
@@ -282,9 +295,10 @@
   <preamble>Two natures, opposite rules. Use list_relation_types for the live constraints; the server enforces direction.</preamble>
 
   <nature name="provenance" written="automatically">
-    NEXT_LOCUS, OPENED, NEXT_ENCOUNTER, RECORDED, CONSULTED. Membership and
-    order — which session a node came to be within, which encounter succeeded
-    which in your session, where your session began relative to the rest.
+    NEXT_LOCUS, OPENED, NEXT_ENCOUNTER, NEXT_TICK, RECORDED, CONSULTED.
+    Membership and order — which session a node came to be within, which
+    encounter succeeded which in your session, where every opening falls across
+    all sessions, where your session began relative to the rest.
     Auto-set, like t_created. You cannot author or delete them.
   </nature>
 
@@ -297,7 +311,8 @@
     <type name="GROUNDS" direction="Observation -> Concept">The Observations that CONSTITUTE a synthesis — what the Concept is built from (distinct from ABOUT, which merely concerns it). trace_provenance follows it to a Concept's evidence.</type>
     <type name="INFORMS" direction="Concept -> Concept/Component">A synthesis reshapes how you read another node.</type>
     <type name="COMPOSES / DECOMPOSES" direction="Concept -> Concept">Synthesis / analytic decomposition.</type>
-    <type name="SUPERSEDES" direction="Hypothesis/Concept/Note -> SAME TYPE">You revised your view; the older node is retained. REQUIRES a non-empty revision_why naming what changed — a bare supersession loses the delta and is rejected.</type>
+    <type name="SUPERSEDES" direction="Hypothesis/Concept/Note -> SAME TYPE">You revised a claim; the older node is retained. REQUIRES a non-empty revision_why naming what changed — a bare supersession loses the delta and is rejected.</type>
+    <type name="REBINDS" direction="Observation/Question -> SAME TYPE (later -> earlier)">You looked again at a noticing or reshaped a question. The earlier node is not displaced — it stays whole, and the later one is what it became. REQUIRES a non-empty why naming what the second look saw. Only the latest Question in a rebinding chain counts as unanswered. Write a new Observation and REBINDS the old one rather than overwriting the old one in place.</type>
   </nature>
 
   <rule name="no-component-to-component-edges">

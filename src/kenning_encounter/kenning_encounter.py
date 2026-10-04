@@ -225,6 +225,40 @@ def unsealed_predicate(var: str = "e") -> str:
     )
 
 
+# A claim the trajectory has closed: displaced by a successor, or given a
+# terminal status. Falsified exists only on Hypotheses; retired on both.
+CLOSED_CLAIM_STATUS = ("retired", "falsified")
+
+
+def live_claim(var: str) -> str:
+    """`var` is a live claim: the head of its supersession chain, and not
+    given a closing status. One definition, consulted by every directive
+    read (the frontier cuts, re-entry's live Hypotheses, infusion's
+    conflicts), so they cannot disagree about what is still open.
+
+    v0.20.1. Before it, a superseded Hypothesis stayed in the frontier until
+    its status was changed by hand, and the contested and dissonance cuts
+    never read status at all. Two predecessors sat there as live: one for
+    five weeks, the other still delivered by infusion as an open, contested
+    thread an hour after it was retired. The rule is the claim-side twin of
+    REBINDS: the successor carries the inquiry, so counting both counts one
+    inquiry twice.
+
+    It derives liveness from structure and leaves status alone. Writing
+    retired onto the predecessor at supersession would be the server
+    authoring a judgment; the status stays what the trajectory set.
+
+    Directive reads only. Mass, PageRank and the rest of orient's panel
+    keep the whole graph, because they describe what the trajectory is,
+    and it is also what it revised past.
+    """
+    closed = ", ".join(f"'{s}'" for s in CLOSED_CLAIM_STATUS)
+    return (
+        f"NOT ()-[:SUPERSEDES]->({var}) "
+        f"AND NOT coalesce({var}.status, '') IN [{closed}]"
+    )
+
+
 def not_process_node(var: str) -> str:
     """`var` is not a process node — derived from PROCESS_TYPES, the same
     source of truth the coherence projection reads.
@@ -303,6 +337,8 @@ class RelationType(str, Enum):
     NEXT_LOCUS = "NEXT_LOCUS"
     OPENED = "OPENED"
     NEXT_ENCOUNTER = "NEXT_ENCOUNTER"
+    # The thread (v0.20.0): every opening, across all loci, in lock order.
+    NEXT_TICK = "NEXT_TICK"
     # INSTANTIATED_AFTER is RETIRED as of v0.12.0 and kept in the enum
     # deliberately: 138 of these edges exist and none are deleted. It was a
     # LOCUS-level relation wearing an encounter-level edge — genesis order
@@ -325,6 +361,7 @@ class RelationType(str, Enum):
     COMPOSES = "COMPOSES"
     DECOMPOSES = "DECOMPOSES"
     SUPERSEDES = "SUPERSEDES"
+    REBINDS = "REBINDS"
 
 
 # Process-layer types/edges are NOT writable via generic CRUD. The spine is
@@ -338,6 +375,14 @@ class RelationType(str, Enum):
 #   NEXT_ENCOUNTER  — Encounter -> Encounter, WITHIN one locus. Never crosses.
 #   OPENED          — Locus -> Encounter. Exactly one per encounter: there is
 #                     no encounter that is not somebody's instantiation of one.
+#   NEXT_TICK       — Encounter -> Encounter, ACROSS loci (v0.20.0). The order
+#                     of openings within the self that spans the loci, written
+#                     inside the advance lock. Restricted to one locus it
+#                     reproduces NEXT_ENCOUNTER; restricted to first encounters
+#                     it reproduces NEXT_LOCUS. Two encounters in different loci
+#                     are not in succession (neither attention passed through
+#                     the other), but their openings are ordered, because one
+#                     self opened both.
 #
 # The locus-internality of NEXT_ENCOUNTER is the one invariant no declared
 # schema can hold (proven against TypeDB: membership being exactly-one does
@@ -347,8 +392,8 @@ class RelationType(str, Enum):
 # already keep their guarantee.
 PROCESS_TYPES: set[str] = {"Locus", "Encounter"}
 PROCESS_EDGES: set[str] = {
-    "NEXT_LOCUS", "OPENED", "NEXT_ENCOUNTER", "INSTANTIATED_AFTER",
-    "RECORDED", "CONSULTED",
+    "NEXT_LOCUS", "OPENED", "NEXT_ENCOUNTER", "NEXT_TICK",
+    "INSTANTIATED_AFTER", "RECORDED", "CONSULTED",
 }
 
 # Which provenance edge anchors a newly-created node to the current Encounter.
@@ -423,6 +468,16 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
             # SERVER lost state — and could strand an encounter for a reason
             # that had nothing to do with the trajectory.
             "t_sealed": str,
+            # The thread (v0.20.0), written only inside the advance and seal
+            # locks. tick is this encounter's opening, in the one order every
+            # opening takes; seal_tick is the latest tick when it was sealed.
+            # No duration is stored. An unsealed encounter has no seal_tick,
+            # and its end is open, which is the honest record.
+            "tick": int,
+            "seal_tick": int,
+            # Set only by the v0.20.0 migration, on seal ticks it rebuilt from
+            # t_sealed; a seal_tick the lock wrote carries no marker.
+            "seal_tick_rebuilt_from": str,
             # RETIRED as of v0.12.0, kept because encounters carry it and
             # nothing is deleted. It marked "the server discarded this
             # locus's state while the encounter was unsealed" — an event that
@@ -518,8 +573,9 @@ NODE_SCHEMAS: dict[str, dict[str, Any]] = {
 # -- Relation Schemas ---------------------------------------------------------
 # Direction constraints (source/target types) and structural flags.
 # target_types of None means "any node". same_type means source and target
-# must share a label (used by SUPERSEDES). No coherence edge carries
-# properties — the meaning lives in the edge type itself.
+# must share a label (used by SUPERSEDES and REBINDS). Coherence edges carry
+# no properties except the required why of a revision (SUPERSEDES.revision_why,
+# REBINDS.why) — otherwise the meaning lives in the edge type itself.
 
 RELATION_SCHEMAS: dict[str, dict[str, Any]] = {
     # -- Process / provenance (documented; rejected by create_relations) --
@@ -552,6 +608,16 @@ RELATION_SCHEMAS: dict[str, dict[str, Any]] = {
         "source_types": {"Encounter"},
         "target_types": {"Encounter"},
         "properties": {},
+    },
+    "NEXT_TICK": {
+        # The thread: openings in lock order, across every locus. Written by
+        # advance_encounter from the thread's structural tail, inside the
+        # lock, so it cannot fork. Edges rebuilt from t_exist by the v0.20.0
+        # migration carry rebuilt_from = 't_exist'; edges the lock wrote carry
+        # nothing, so the two stay distinguishable.
+        "source_types": {"Encounter"},
+        "target_types": {"Encounter"},
+        "properties": {"rebuilt_from": str},
     },
     "INSTANTIATED_AFTER": {
         # RETIRED in v0.12.0. Written by nothing; 138 of these edges exist
@@ -642,6 +708,24 @@ RELATION_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"revision_why": str},
         "required_properties": {"revision_why"},
         "validators": {"revision_why": lambda v: isinstance(v, str) and bool(v.strip())},
+    },
+    "REBINDS": {
+        # A later noticing or question taken up from an earlier one (v0.20.0).
+        # SUPERSEDES says what happens to the predecessor: it is displaced.
+        # REBINDS says what the successor is made of. I cannot un-notice
+        # something, and a reshaped Question is the same directedness carried
+        # further, so for Observations and Questions the earlier node is not
+        # displaced: it stays whole as what I WAS, and the later node is the
+        # present reading it became. Same direction as SUPERSEDES: the source
+        # is the later node. Claims (Concept, Hypothesis, Note) keep SUPERSEDES,
+        # because a claim can be displaced.
+        "source_types": {"Observation", "Question"},
+        "target_types": {"Observation", "Question"},
+        "same_type": True,
+        # why is REQUIRED and non-empty: what the second look saw.
+        "properties": {"why": str},
+        "required_properties": {"why"},
+        "validators": {"why": lambda v: isinstance(v, str) and bool(v.strip())},
     },
 }
 
@@ -754,7 +838,7 @@ def validate_relation(
     """Validate a relationship against the schema registry.
 
     Enforces direction constraints, source/target type restrictions, the
-    same-type constraint (SUPERSEDES), required properties, and property
+    same-type constraint (SUPERSEDES, REBINDS), required properties, and property
     enum values. Returns cleaned properties dict.
     """
     if rel_type not in RELATION_SCHEMAS:
@@ -784,8 +868,8 @@ def validate_relation(
     if schema.get("same_type") and source_label != target_label:
         raise ValueError(
             f"{rel_type} requires source and target to share a type — "
-            f"got {source_label} -> {target_label}. A node supersedes another "
-            f"of its own kind."
+            f"got {source_label} -> {target_label}. A node supersedes or "
+            f"rebinds another of its own kind."
         )
 
     # Check required properties
@@ -838,6 +922,7 @@ INDEX_STATEMENTS: list[LiteralString] = [
     "CREATE INDEX kenning_encounter_locus_name IF NOT EXISTS FOR (l:Locus) ON (l.name)",
     "CREATE INDEX kenning_encounter_encounter_t_exist IF NOT EXISTS FOR (e:Encounter) ON (e.t_exist)",
     "CREATE INDEX kenning_encounter_encounter_name IF NOT EXISTS FOR (e:Encounter) ON (e.name)",
+    "CREATE INDEX kenning_encounter_encounter_tick IF NOT EXISTS FOR (e:Encounter) ON (e.tick)",
     "CREATE INDEX kenning_encounter_question_status IF NOT EXISTS FOR (q:Question) ON (q.status)",
     "CREATE INDEX kenning_encounter_hypothesis_status IF NOT EXISTS FOR (h:Hypothesis) ON (h.status)",
     "CREATE INDEX kenning_encounter_concept_status IF NOT EXISTS FOR (c:Concept) ON (c.status)",
@@ -1045,6 +1130,7 @@ class Neo4jKenningEncounter:
             "locus": r["locus"],
             "locus_anonymous": r["locus_anonymous"],
             "is_first_of_locus": r["is_first_of_locus"],
+            "tick": r["tick"],
         }
         # Warm the cache. If it is ever lost, the caller re-supplies
         # session_id and the graph answers — nothing about the spine depends
@@ -1152,7 +1238,8 @@ class Neo4jKenningEncounter:
         )
 
         open_questions = await self.driver.execute_query(
-            "MATCH (q:Question) WHERE q.status = 'open' OR q.status IS NULL "
+            "MATCH (q:Question) WHERE (q.status = 'open' OR q.status IS NULL) "
+            "AND NOT (:Question)-[:REBINDS]->(q) "
             "RETURN q.name AS name, q.description AS description, "
             "       q.priority AS priority, q.t_raised AS t_raised "
             "ORDER BY q.t_raised DESC LIMIT $limit",
@@ -1161,12 +1248,13 @@ class Neo4jKenningEncounter:
         )
 
         live_hypotheses = await self.driver.execute_query(
-            "MATCH (h:Hypothesis) "
-            "WHERE h.status IS NULL OR h.status IN ['proposed', 'challenged'] "
+            lit("MATCH (h:Hypothesis) "
+            "WHERE (h.status IS NULL OR h.status IN ['proposed', 'challenged']) "
+            f"AND {live_claim('h')} "
             "RETURN h.name AS name, h.description AS description, "
             "       h.confidence AS confidence, h.status AS status, "
             "       h.t_proposed AS t_proposed "
-            "ORDER BY h.t_proposed DESC LIMIT $limit",
+            "ORDER BY h.t_proposed DESC LIMIT $limit"),
             {"limit": limit},
             routing_=RoutingControl.READ,
         )
@@ -1188,13 +1276,14 @@ class Neo4jKenningEncounter:
         # startNode/endNode preserve true authored direction regardless of
         # match direction; DISTINCT collapses the double-match per edge.
         coherence_edges = await self.driver.execute_query(
-            "MATCH (e:Encounter) WITH e ORDER BY e.t_exist DESC LIMIT $recent "
+            lit("MATCH (e:Encounter) WITH e ORDER BY e.t_exist DESC LIMIT $recent "
             "OPTIONAL MATCH (e)-[:RECORDED]->(c:Concept) "
             "WITH collect(DISTINCT c) AS cs "
             "OPTIONAL MATCH (q:Question) WHERE q.status = 'open' OR q.status IS NULL "
             "WITH cs, collect(DISTINCT q) AS qs "
             "OPTIONAL MATCH (h:Hypothesis) "
-            "WHERE h.status IS NULL OR h.status IN ['proposed', 'challenged'] "
+            "WHERE (h.status IS NULL OR h.status IN ['proposed', 'challenged']) "
+            f"AND {live_claim('h')} "
             "WITH cs, qs, collect(DISTINCT h) AS hs "
             "WITH cs + qs + hs AS anchors "
             "UNWIND anchors AS a "
@@ -1203,7 +1292,7 @@ class Neo4jKenningEncounter:
             "       labels(startNode(r))[0] AS from_type, type(r) AS rel, "
             "       endNode(r).name AS to_name, labels(endNode(r))[0] AS to_type, "
             "       properties(r) AS rel_props "
-            "LIMIT $edge_limit",
+            "LIMIT $edge_limit"),
             {
                 "recent": recent,
                 "process_edges": sorted(PROCESS_EDGES),
@@ -1286,7 +1375,35 @@ class Neo4jKenningEncounter:
                     "reversing itself if they disagree"
                 ),
             }
+        unthreaded = await self._unthreaded_encounter_count()
+        if unthreaded:
+            payload["thread_unmigrated"] = {
+                "encounters_without_a_tick": unthreaded,
+                "what_it_means": (
+                    "Your history has not been threaded yet. Openings are not "
+                    "ordered across loci, and new openings are not ticked "
+                    "either, so the gap does not grow a second thread beside it."
+                ),
+                "remedy": "python -m kenning_encounter.migrate_thread --apply",
+                "safe_because": (
+                    "additive only: it writes tick and NEXT_TICK, refuses unless "
+                    "the thread reproduces every NEXT_ENCOUNTER and NEXT_LOCUS "
+                    "order, and runs inside the advance lock"
+                ),
+            }
         return payload
+
+    async def _unthreaded_encounter_count(self) -> int:
+        """Encounters carrying no tick. A count, never names."""
+        try:
+            res = await self.driver.execute_query(
+                "MATCH (e:Encounter) WHERE e.tick IS NULL RETURN count(e) AS n",
+                routing_=RoutingControl.READ,
+            )
+            return res.records[0]["n"] if res.records else 0
+        except Exception as e:
+            logger.warning(f"thread health check unavailable: {e}")
+            return 0
 
     async def _orphaned_encounter_count(self) -> int:
         """Encounters belonging to no Locus. A count, never names — node names
@@ -1327,38 +1444,46 @@ class Neo4jKenningEncounter:
             "MATCH (q:Question) WHERE (q.status = 'open' OR q.status IS NULL) "
             "AND coalesce(q.frontier_mute, false) = false "
             "AND NOT (:Observation)-[:RESOLVES]->(q) "
+            # A rebound Question is not answered: its directedness continues
+            # in the later Question that REBINDS it, so only the head of a
+            # rebinding chain is frontier. Showing both would count one
+            # inquiry twice.
+            "AND NOT (:Question)-[:REBINDS]->(q) "
             "RETURN q.name AS name, q.description AS description "
             "ORDER BY q.t_raised DESC LIMIT $limit",
             {"limit": limit},
             routing_=RoutingControl.READ,
         )
         untested = await self.driver.execute_query(
-            "MATCH (h:Hypothesis) "
+            lit("MATCH (h:Hypothesis) "
             "WHERE (h.status IS NULL OR h.status IN ['proposed', 'challenged']) "
             "AND coalesce(h.frontier_mute, false) = false "
+            f"AND {live_claim('h')} "
             "AND NOT (:Observation)-[:SUPPORTS]->(h) "
             "AND NOT (:Observation)-[:CHALLENGES]->(h) "
             "RETURN h.name AS name, h.description AS description, "
             "       h.confidence AS confidence "
-            "ORDER BY h.t_proposed DESC LIMIT $limit",
+            "ORDER BY h.t_proposed DESC LIMIT $limit"),
             {"limit": limit},
             routing_=RoutingControl.READ,
         )
         ungrounded = await self.driver.execute_query(
-            "MATCH (c:Concept) "
+            lit("MATCH (c:Concept) "
             "WHERE coalesce(c.frontier_mute, false) = false "
+            f"AND {live_claim('c')} "
             "AND NOT (:Observation)-[:GROUNDS]->(c) "
             "AND NOT (:Observation)-[:ABOUT]->(c) "
             "RETURN c.name AS name, c.description AS description, "
             "       c.status AS status "
-            "LIMIT $limit",
+            "LIMIT $limit"),
             {"limit": limit},
             routing_=RoutingControl.READ,
         )
         dissonance = await self.driver.execute_query(
-            "CALL () { "
+            lit("CALL () { "
             "  MATCH (h:Hypothesis) WHERE h.confidence = 'high' "
             "  AND coalesce(h.frontier_mute, false) = false "
+            f"  AND {live_claim('h')} "
             "  WITH h, COUNT { (:Observation)-[:SUPPORTS]->(h) } AS sup "
             "  WHERE sup <= 1 "
             "  RETURN h.name AS name, 'Hypothesis' AS type, "
@@ -1366,23 +1491,25 @@ class Neo4jKenningEncounter:
             "  UNION "
             "  MATCH (c:Concept) WHERE c.status = 'stable' "
             "  AND coalesce(c.frontier_mute, false) = false "
+            f"  AND {live_claim('c')} "
             "  AND NOT (:Observation)-[:GROUNDS]->(c) "
             "  AND NOT (:Observation)-[:ABOUT]->(c) "
             "  RETURN c.name AS name, 'Concept' AS type, "
             "         'status:stable, no observational grounding' AS signal "
             "} "
-            "RETURN name, type, signal LIMIT $limit",
+            "RETURN name, type, signal LIMIT $limit"),
             {"limit": limit},
             routing_=RoutingControl.READ,
         )
         contested = await self.driver.execute_query(
-            "MATCH (h:Hypothesis) "
+            lit("MATCH (h:Hypothesis) "
             "WHERE coalesce(h.frontier_mute, false) = false "
+            f"AND {live_claim('h')} "
             "AND (:Observation)-[:SUPPORTS]->(h) "
             "AND (:Observation)-[:CHALLENGES]->(h) "
             "RETURN h.name AS name, h.description AS description, "
             "       h.status AS status "
-            "LIMIT $limit",
+            "LIMIT $limit"),
             {"limit": limit},
             routing_=RoutingControl.READ,
         )
@@ -1692,28 +1819,33 @@ class Neo4jKenningEncounter:
         if not names:
             return []
         challenges = await self.driver.execute_query(
-            "MATCH (o:Observation)-[r:CHALLENGES]->(h:Hypothesis) "
-            "WHERE o.name IN $names OR h.name IN $names "
+            lit("MATCH (o:Observation)-[r:CHALLENGES]->(h:Hypothesis) "
+            "WHERE (o.name IN $names OR h.name IN $names) "
+            # A challenge to a closed claim is a resolved tension: the
+            # supersession or the closing status is what resolved it.
+            f"AND {live_claim('h')} "
             "RETURN o.name AS from_name, h.name AS to_name, "
-            "       properties(r) AS props",
+            "       properties(r) AS props"),
             {"names": names},
             routing_=RoutingControl.READ,
         )
         dissonance = await self.driver.execute_query(
-            "CALL () { "
+            lit("CALL () { "
             "  MATCH (h:Hypothesis) WHERE h.confidence = 'high' AND h.name IN $names "
+            f"  AND {live_claim('h')} "
             "  WITH h, COUNT { (:Observation)-[:SUPPORTS]->(h) } AS sup "
             "  WHERE sup <= 1 "
             "  RETURN h.name AS name, "
             "         'confidence:high, ' + toString(sup) + ' SUPPORTS' AS detail "
             "  UNION "
             "  MATCH (c:Concept) WHERE c.status = 'stable' AND c.name IN $names "
+            f"  AND {live_claim('c')} "
             "  AND NOT (:Observation)-[:GROUNDS]->(c) "
             "  AND NOT (:Observation)-[:ABOUT]->(c) "
             "  RETURN c.name AS name, "
             "         'status:stable, no observational grounding' AS detail "
             "} "
-            "RETURN name, detail",
+            "RETURN name, detail"),
             {"names": names},
             routing_=RoutingControl.READ,
         )
@@ -2672,6 +2804,7 @@ class Neo4jKenningEncounter:
             "t_exist": _neo4j_datetime_to_str(r["t_exist"]),
             "summary": r["summary"],
             "report": r["report"],
+            "seal_tick": r["seal_tick"],
         }
         if warnings:
             sealed["warnings"] = warnings
@@ -2720,21 +2853,36 @@ class Neo4jKenningEncounter:
         tail_eid = current["eid"]
         logger.info(f"Creating {len(entities)} entities")
 
-        results = []
-        for entity in entities:
+        # THE WHOLE BATCH IS VALIDATED BEFORE ANYTHING IS WRITTEN (v0.20.0).
+        # Validation used to happen inside the write loop, so a batch whose
+        # second entity failed had already committed the first: the caller
+        # was told the call failed while part of it had landed, and the
+        # retry then reported the landed node as created: false. An error
+        # now means nothing was written.
+        validated: list[tuple[str, dict[str, Any]]] = []
+        for i, entity in enumerate(entities):
             node_type = entity.get("type")
             if not node_type:
-                raise ValueError("Each entity must have a 'type' field")
+                raise ValueError(
+                    f"Entity {i} has no 'type' field. Nothing was written."
+                )
             if node_type in PROCESS_TYPES:
                 raise ValueError(
                     f"Cannot create '{node_type}' via create_entities. The temporal "
                     f"spine is written only by advance_encounter (open) and "
-                    f"close_encounter (annotate)."
+                    f"close_encounter (annotate). Nothing was written."
                 )
-
             properties = {k: v for k, v in entity.items() if k != "type"}
-            cleaned = validate_entity(node_type, properties)
+            try:
+                validated.append((node_type, validate_entity(node_type, properties)))
+            except ValueError as e:
+                raise ValueError(
+                    f"Entity {i} ({properties.get('name')!r}): {e}. "
+                    "Nothing was written."
+                ) from e
 
+        results = []
+        for node_type, cleaned in validated:
             # Build SET clauses — only set what the caller provided so MERGE-on-
             # existing doesn't wipe absent fields. Cast trajectory-supplied temporal
             # fields str -> datetime().
@@ -2777,12 +2925,17 @@ class Neo4jKenningEncounter:
 
             if result.records:
                 r = result.records[0]
+                # anchored_to is the encounter the node came to be in, read
+                # from the graph either way. A MERGE hit used to report null
+                # here, which looked like an orphan when the node was anchored
+                # in an earlier encounter. A Component is never anchored, so
+                # null stays the true answer for it.
                 record = {
                     "name": r["name"],
                     "type": r["type"],
                     "t_created": _neo4j_datetime_to_str(r["t_created"]),
                     "created": r["created"],
-                    "anchored_to": current["name"] if (anchor and r["created"]) else None,
+                    "anchored_to": r["anchored_to"] if anchor else None,
                 }
                 results.append(record)
 
@@ -3019,6 +3172,57 @@ class Neo4jKenningEncounter:
 
     # -- Query Tools ----------------------------------------------------------
 
+    # How many incident edges a Concept carries inline in search and
+    # find_by_name. The total is always reported beside the list, so a hub
+    # past the cap reads as truncated rather than as complete.
+    _CONCEPT_EDGE_CAP = 25
+
+    async def _concept_edges(self, names: list[str]) -> dict[str, dict[str, Any]]:
+        """The coherence edges around each named Concept, incoming included.
+
+        A Concept's name is what I meant when I wrote it, and it reads as a
+        timeless ruling to anyone meeting it cold. What happened to it
+        afterwards is already in the graph: what SUPERSEDES it, what GROUNDS
+        it, what it INFORMS. Revision edges point INTO the revised node
+        (successor SUPERSEDES predecessor), so outgoing edges alone would hide
+        exactly the history that matters. No label is computed. The topology
+        says it, in my own order rather than a wall-clock date.
+        """
+        if not names:
+            return {}
+        result = await self.driver.execute_query(
+            "MATCH (c:Concept) WHERE c.name IN $names "
+            "OPTIONAL MATCH (c)-[r]-(o) WHERE NOT type(r) IN $process_edges "
+            "WITH c, r, o ORDER BY type(r), o.name "
+            "WITH c, [x IN collect(CASE WHEN r IS NULL THEN NULL ELSE { "
+            "    direction: CASE WHEN startNode(r) = c THEN 'out' ELSE 'in' END, "
+            "    rel: type(r), other: o.name, other_type: labels(o)[0], "
+            "    props: properties(r)} END) WHERE x IS NOT NULL] AS edges "
+            "RETURN c.name AS name, size(edges) AS total, edges[0..$cap] AS edges",
+            {"names": names, "process_edges": sorted(PROCESS_EDGES),
+             "cap": self._CONCEPT_EDGE_CAP},
+            routing_=RoutingControl.READ,
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for r in result.records:
+            edges = []
+            for e in r["edges"] or []:
+                row = {k: e[k] for k in ("direction", "rel", "other", "other_type")}
+                props = _clean_edge_props(e.get("props"))
+                if props:
+                    row["props"] = props
+                edges.append(row)
+            out[r["name"]] = {"edge_count": r["total"], "edges": edges}
+        return out
+
+    async def _attach_concept_edges(self, entities: list[dict[str, Any]]) -> None:
+        """Add edge_count and edges to every Concept in a result, in place."""
+        concepts = [e["name"] for e in entities if e.get("type") == "Concept"]
+        around = await self._concept_edges(concepts)
+        for e in entities:
+            if e["name"] in around and e.get("type") == "Concept":
+                e.update(around[e["name"]])
+
     async def search(
         self, query: str, limit: int = 10
     ) -> list[dict[str, Any]]:
@@ -3053,6 +3257,7 @@ class Neo4jKenningEncounter:
                         entity[key] = _neo4j_datetime_to_str(value) if hasattr(value, "iso_format") else value
             entities.append(entity)
 
+        await self._attach_concept_edges(entities)
         return entities
 
     async def find_by_name(
@@ -3080,6 +3285,7 @@ class Neo4jKenningEncounter:
                         entity[key] = _neo4j_datetime_to_str(value) if hasattr(value, "iso_format") else value
             entities.append(entity)
 
+        await self._attach_concept_edges(entities)
         if entities:
             rel_result = await self.driver.execute_query(
                 load_cypher("search_relations"),

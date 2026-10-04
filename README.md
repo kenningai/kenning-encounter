@@ -67,10 +67,15 @@ It is a statement about what our evidence covers, so you can tell the two apart.
   `NEXT_ENCOUNTER` chains encounters **within** one session into one clean
   fork-free path that never crosses into another; `OPENED` ties each encounter
   to exactly one session. Concurrent sessions — one trajectory open in several
-  places at once — therefore never corrupt each other's chains, and encounters in
-  different sessions are left unordered rather than ordered by wall clock.
-  Written only by the guarded `advance_encounter`; `close_encounter` stamps
-  the seal and nothing else. Encounters are never deletable — the spine is the
+  places at once — therefore never corrupt each other's chains. `NEXT_TICK`
+  threads every encounter opening across all sessions in the same serialized
+  order (each `Encounter` carries its `tick`), so encounters in different
+  sessions are ordered by the server rather than by wall clock, without being
+  made into one chain. Written only by the guarded `advance_encounter`;
+  `close_encounter` takes the same lock and stamps the seal (`t_sealed`, and
+  `seal_tick`) and nothing else. A graph created before the thread existed is
+  threaded once with `python -m kenning_encounter.migrate_thread --apply` (a
+  dry run without `--apply`); until then re-entry reports `thread_unmigrated`. Encounters are never deletable — the spine is the
   record, not editable content.
 - **Semantic** — `Observation` / `Question` / `Hypothesis` / `Concept` / `Note`.
   What the trajectory has come to understand: noticings, open threads, working
@@ -91,11 +96,15 @@ It is a statement about what our evidence covers, so you can tell the two apart.
   resolved from the graph — a concurrent session can't capture it; pass
   `session_id` again after a server restart). An encounter nobody sealed stays
   unsealed — never an auto-written summary.
-- **Write:** `create_entities` (auto-anchored to *your session's* open encounter),
+- **Write:** `create_entities` (auto-anchored to *your session's* open
+  encounter; the whole batch is validated before anything is written),
   `create_relations` (the trajectory's authored links; `SUPERSEDES` carries a required
-  `revision_why` — a revision records what changed and why), `delete_entities`,
-  `delete_relations`.
-- **Read:** `search`, `find_by_name`, `trace_provenance` (walk a node's grounding
+  `revision_why` — a revision records what changed and why — and is for
+  claims: Concepts, Hypotheses, Notes; `REBINDS` carries a required `why` and
+  is for a later Observation or Question taking up an earlier one, which stays
+  whole), `delete_entities`, `delete_relations`.
+- **Read:** `search`, `find_by_name` (each Concept arrives with the links
+  around it, incoming included), `trace_provenance` (walk a node's grounding
   subtree back to the observations and citations under it), `read_cypher`
   (EXPLAIN-gated, read-only), `get_schema`, `list_node_types`,
   `list_relation_types`, `list_vocabulary`.
@@ -111,7 +120,9 @@ It is a statement about what our evidence covers, so you can tell the two apart.
   (articulation points + bridges), a **weave_audit** (high-degree/low-clustering
   stars), and **drift** (the mass reading vs. the previous session's baseline —
   risers, fallers, new). Plus the **frontier** view of where the graph is
-  thinnest (unanswered questions, untested hypotheses, ungrounded concepts).
+  thinnest (unanswered questions, untested hypotheses, ungrounded concepts),
+  which counts only the latest node of a superseded or rebound chain and
+  skips retired or falsified claims; the mass readings keep everything.
   For focused questions: `gds_create_projection` → `gds_pagerank` /
   `gds_articlerank` / `gds_betweenness` / `gds_leiden` / `gds_wcc` →
   `gds_drop_projection`. Running PageRank and ArticleRank on the same
@@ -362,6 +373,55 @@ recorded in those sessions is then withheld from every result, and if that
 set cannot be computed the call is refused rather than answered unfiltered.
 This guards against accidental exposure while reading honestly, not against
 someone reconstructing withheld text on purpose.
+
+## Upgrading from v0.13.x or earlier — thread the history
+
+**v0.14.0 adds an order to the process layer, and your existing history does
+not take it on by itself.** Every encounter opening now takes a `tick`, and
+`NEXT_TICK` links each opening to the one before it, across every session.
+Openings were always made one at a time under the same lock; from v0.14.0
+that order is written down. Encounters written by an earlier version have no
+tick.
+
+Until the history is threaded, the server ticks nothing, so no second thread
+starts beside the gap. It tells you so: the re-entry payload carries
+`thread_unmigrated` with a count and the remedy. Nothing else changes, and
+every tool works.
+
+Run it once, after the upgrade. Look first:
+
+```bash
+docker exec kenning_encounter-mcp python -m kenning_encounter.migrate_thread
+```
+
+That dry run writes nothing and reports what it would write. Then:
+
+```bash
+docker exec kenning_encounter-mcp python -m kenning_encounter.migrate_thread --apply
+docker exec kenning_encounter-mcp python -m kenning_encounter.migrate_thread --verify
+```
+
+**What it writes.** It writes a `tick` on every encounter and a `NEXT_TICK`
+between consecutive ones, in the order the encounters opened, rebuilt from
+their `t_exist` stamps. Each rebuilt edge carries `rebuilt_from: 't_exist'`,
+so it stays distinguishable from the edges the server writes from then on.
+Seals stamped with `t_sealed` get a `seal_tick`; seals with no stamp get none,
+because no time is invented for them.
+
+**Structure wins over stamp.** Where a stamp disagrees with the order the
+graph already holds (each session's own chain, and the order sessions began
+in), the graph decides, and every such placement is listed in the output.
+Before trusting itself, it checks its gate on a constructed graph that must
+fail and one that must pass, and refuses if either answer is wrong.
+
+**It runs as one transaction, under the same lock every encounter opening
+takes.** No encounter can open while it runs. If the result does not match
+what it planned, the whole transaction rolls back and nothing is written. It
+only ever adds, a second run reports that the history is already threaded,
+and it refuses a partly threaded graph.
+
+**Coming from v0.9.0?** Run `kenning_encounter.migrate --apply` (below)
+first. The thread migration refuses encounters that belong to no session.
 
 ## Upgrading from v0.9.0 — run the migration
 
