@@ -779,7 +779,7 @@ class TestInfuseConfig:
             "https://generativelanguage.googleapis.com/v1beta"
         )
         assert cfg["matcher_model"] == "gemini-3.5-flash-lite"
-        assert cfg["matcher_timeout_ms"] == 5000  # measured renegotiation
+        assert cfg["matcher_timeout_ms"] == 8500  # hedge 3700 + a fallback
         assert cfg["matcher_sidecar"] == "models/meaning_sidecar.json"
         monkeypatch.setenv("GEMINI_API_KEY", "k-123")
         monkeypatch.setenv("NEO4J_MATCHER_MODEL", "gemini-other")

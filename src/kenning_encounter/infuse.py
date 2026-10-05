@@ -710,11 +710,17 @@ def matcher_fallback_note(selection_meta: dict[str, Any] | None) -> str | None:
         # variable a comparison between voices measures, and the header is
         # read by the subject of that comparison. The failure is named,
         # because a lead that has gone dark is the operator's to know.
-        failed = [a for a in selection_meta.get("attempts") or [] if "error" in a]
+        # Under hedging the lead can deliver after a fallback
+        # failed or was overtaken, so an error in attempts no longer means
+        # the lead did not deliver. Only who delivered says that.
         lead, voice = selection_meta.get("lead"), selection_meta.get("voice")
-        if failed:
-            reason = _clip_reason(str(failed[0].get("error", "")))
-        elif lead and voice and lead != voice:
+        failed = [a for a in selection_meta.get("attempts") or [] if "error" in a]
+        if lead and voice and lead == voice:
+            return None
+        lead_failed = [a for a in failed if a.get("voice") == lead]
+        if lead_failed or failed:
+            reason = _clip_reason(str((lead_failed or failed)[0].get("error", "")))
+        elif lead and voice:
             # The lead was not even tried: it failed recently and is cooling.
             reason = "the lead failed recently and is cooling down"
         else:

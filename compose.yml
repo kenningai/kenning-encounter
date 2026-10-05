@@ -78,7 +78,7 @@ services:
 
   kenning_encounter:
     build: .
-    image: kenning-encounter:0.14.0
+    image: kenning-encounter:0.15.0
     container_name: kenning_encounter-mcp
     depends_on:
       neo4j:
@@ -96,7 +96,9 @@ services:
       NEO4J_MCP_SERVER_PATH: "/api/mcp/"
       # Host-header check: refuses a request that reached the port by DNS
       # rebinding (a web page in a browser on this host, posing as local).
-      NEO4J_MCP_SERVER_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      # A host-local proxy (e.g. a tailnet Serve) forwards its own name; add
+      # it in .env, so the host's network name never enters the repo.
+      NEO4J_MCP_SERVER_ALLOWED_HOSTS: "${KENNING_ENCOUNTER_FULL_ALLOWED_HOSTS:-localhost,127.0.0.1}"
       # Opt-in: no MCP sessions, so a restart leaves nothing stale for a
       # client or bridge to hold. Every locus-scoped call must then pass
       # session_id. Default off.
@@ -121,20 +123,32 @@ services:
       # other. GEMINI_API_KEY enables the Gemini voice, OPENAI_API_KEY the
       # OpenAI one. NEO4J_MATCHER_LEAD picks which leads (gemini | openai |
       # alternate — the last chosen per locus from the session id); the
-      # other is the fallback, in the same 5000 ms budget. A voice that
-      # fails is tried after the healthy one for NEO4J_MATCHER_COOLDOWN_S.
-      # Which voice should lead is not settled: it has not been measured.
+      # other is the fallback, inside one shared budget. A voice that fails
+      # is tried after the healthy one for NEO4J_MATCHER_COOLDOWN_S. Which
+      # voice should lead is not settled: it has not been measured.
       #
-      # Timeout 5000 ms is deliberate and measured: the arc-dependent cases
-      # that justify the mechanism take ~3.5 s of reasoning, and a cap that
-      # cuts the tail kills exactly the calls buying the most.
+      # HEDGE. A failed lead starts the fallback at once; a lead still
+      # silent NEO4J_MATCHER_HEDGE_MS after it began starts the fallback
+      # alongside it, and the first valid answer wins (0 = sequential). A
+      # healthy call ends well inside the hedge point, while a failure tends
+      # to hang to the timeout, which under one shared budget left the
+      # fallback nothing. The budget (8500 ms) is the hedge plus one full
+      # fallback call; the hook's timeout (12 s) sits above it. The per-call
+      # need stands: arc-dependent cases take ~3.5 s, and a cap that cuts
+      # that tail kills exactly the calls buying the most.
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       NEO4J_MATCHER_MODEL: "${NEO4J_MATCHER_MODEL:-gemini-3.5-flash-lite}"
+      # The Gemini voice's thinkingLevel: empty sends none, as flash-lite
+      # was measured. A model that cannot turn thinking off
+      # (gemini-3.8-flash; it also refuses "minimal") takes "low". A new
+      # model is a new voice: it compresses its own sidecar on first start.
+      NEO4J_MATCHER_THINKING: "${NEO4J_MATCHER_THINKING:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       NEO4J_MATCHER_OPENAI_MODEL: "${NEO4J_MATCHER_OPENAI_MODEL:-gpt-6-luna}"
       NEO4J_MATCHER_LEAD: "${NEO4J_MATCHER_LEAD:-gemini}"
       NEO4J_MATCHER_COOLDOWN_S: "${NEO4J_MATCHER_COOLDOWN_S:-300}"
-      NEO4J_MATCHER_TIMEOUT_MS: "${NEO4J_MATCHER_TIMEOUT_MS:-5000}"
+      NEO4J_MATCHER_TIMEOUT_MS: "${NEO4J_MATCHER_TIMEOUT_MS:-8500}"
+      NEO4J_MATCHER_HEDGE_MS: "${NEO4J_MATCHER_HEDGE_MS:-3700}"
       # Selections per call (max 12 = the seed limit). Output tokens are the
       # dominant cost of a warm call, so this is the latency lever.
       NEO4J_MATCHER_TOP_N: "${NEO4J_MATCHER_TOP_N:-12}"
@@ -171,7 +185,7 @@ services:
   # Direct reading is for the keeper's own work; anyone else asks.
   kenning_encounter-reader:
     build: .
-    image: kenning-encounter:0.14.0
+    image: kenning-encounter:0.15.0
     container_name: kenning_encounter-reader
     depends_on:
       neo4j:

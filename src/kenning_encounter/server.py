@@ -194,10 +194,11 @@ def create_mcp_server(
     infuse_refresh_turns: int = 10,
     voices: list[Voice] | None = None,
     matcher_lead: str = "gemini",
-    matcher_timeout_ms: int = 5000,
+    matcher_timeout_ms: int = 8500,
     matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
     matcher_cooldown_s: float = 300.0,
+    matcher_hedge_ms: int = 3700,
     matcher_shadow: bool = False,
     matcher_shadow_log: str = "models/matcher-shadow.jsonl",
     reconcile_retries: dict[str, ReconcileRetry] | None = None,
@@ -1249,6 +1250,7 @@ def create_mcp_server(
                 matched = await match_chain(
                     _candidates(order), traj_text, matcher_top_n, health,
                     timeout_ms=matcher_timeout_ms,
+                    hedge_ms=matcher_hedge_ms or None,
                 )
                 voice: Voice = matched["voice"]
                 index: MeaningIndex = matched["index"]
@@ -1475,6 +1477,7 @@ def create_mcp_server(
                     VoiceHealth(cooldown_s=0) if voice else health,
                     timeout_ms=matcher_timeout_ms,
                     include_reasons=include_reasons,
+                    hedge_ms=matcher_hedge_ms or None,
                 )
                 chosen: MeaningIndex = matched["index"]
                 index = chosen
@@ -1592,6 +1595,24 @@ def create_mcp_server(
 
 # -- Server Entry Point -------------------------------------------------------
 
+async def prepare_schema(kenning_encounter: Any, server_profile: str) -> bool:
+    """Create the indexes and constraints, unless this face is the reader.
+
+    A reader that writes, even only at startup, is not a reader. The
+    schema is the full face's to keep: it is the writer, and the indexes
+    exist for its writes and for every reader's queries. A
+    reader started against a graph the full face has never prepared finds
+    no fulltext index, and its search says so; it does not create one.
+    Skipping it here also ends the startup deadlock of the two faces
+    taking schema locks at once. Returns whether schema was written."""
+    if server_profile == "reader":
+        logger.warning("READER PROFILE: startup schema creation skipped (writes nothing)")
+        return False
+    await kenning_encounter.create_fulltext_index()
+    await kenning_encounter.create_indexes()
+    return True
+
+
 async def main(
     neo4j_uri: str,
     neo4j_user: str,
@@ -1610,7 +1631,7 @@ async def main(
     matcher_api_key: str = "",
     matcher_endpoint: str = "https://generativelanguage.googleapis.com/v1beta",
     matcher_model: str = "gemini-3.5-flash-lite",
-    matcher_timeout_ms: int = 5000,
+    matcher_timeout_ms: int = 8500,
     matcher_top_n: int = 12,
     matcher_sidecar: str = "models/meaning_sidecar.json",
     matcher_openai_api_key: str = "",
@@ -1618,6 +1639,8 @@ async def main(
     matcher_openai_endpoint: str = "https://api.openai.com/v1",
     matcher_lead: str = "gemini",
     matcher_cooldown_s: int = 300,
+    matcher_hedge_ms: int = 3700,
+    matcher_thinking: str = "",
     matcher_shadow: bool = False,
     matcher_shadow_log: str = "models/matcher-shadow.jsonl",
     stateless_http: bool = False,
@@ -1649,8 +1672,7 @@ async def main(
         exit(1)
 
     kenning_encounter = Neo4jKenningEncounter(neo4j_driver)
-    await kenning_encounter.create_fulltext_index()
-    await kenning_encounter.create_indexes()
+    await prepare_schema(kenning_encounter, server_profile)
 
     # Startup reconcile sweep (background, non-blocking): the on-write
     # trigger covers nodes created through THIS server while it runs; the
@@ -1663,7 +1685,8 @@ async def main(
     # The Gemini voice is always present (keyless it reports itself
     # unconfigured, as before v0.17.0); the OpenAI voice exists only with a
     # key, so a deployment that never set one sees nothing new.
-    voices = [Voice("gemini", matcher_model, matcher_api_key, matcher_endpoint)]
+    voices = [Voice("gemini", matcher_model, matcher_api_key, matcher_endpoint,
+                    thinking=matcher_thinking)]
     if matcher_openai_api_key:
         voices.append(Voice(
             "openai", matcher_openai_model, matcher_openai_api_key,
@@ -1836,6 +1859,7 @@ async def main(
         matcher_top_n=matcher_top_n,
         matcher_sidecar=matcher_sidecar,
         matcher_cooldown_s=matcher_cooldown_s,
+        matcher_hedge_ms=matcher_hedge_ms,
         matcher_shadow=matcher_shadow,
         matcher_shadow_log=matcher_shadow_log,
         reconcile_retries=reconcile_retries,

@@ -229,10 +229,30 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
         or os.getenv("NEO4J_MATCHER_MODEL")
         or "gemini-3.5-flash-lite"
     )
+    # Gemini voice's thinkingLevel. "" sends none, the measured
+    # flash-lite behaviour. Thinking-only models (3.8 Flash cannot turn it
+    # off, and refuses "minimal") need "low" to stay inside the budget. An
+    # unknown value is refused here, at startup, not by a 400 per prompt.
+    th = getattr(args, "matcher_thinking", None)
+    if th is None:
+        th = os.getenv("NEO4J_MATCHER_THINKING", "")
+    th = th.strip().lower()
+    if th not in ("", "minimal", "low", "medium", "high"):
+        raise ValueError(
+            f"NEO4J_MATCHER_THINKING={th!r}: use minimal, low, medium, high or empty"
+        )
+    config["matcher_thinking"] = th
     mt = args.matcher_timeout_ms
     if mt is None:
         mt = _env_int("NEO4J_MATCHER_TIMEOUT_MS")
-    config["matcher_timeout_ms"] = 5000 if mt is None else max(100, min(10_000, mt))
+    config["matcher_timeout_ms"] = 8500 if mt is None else max(100, min(10_000, mt))
+    # Hedge point: a lead voice still silent this long after it
+    # began starts the next voice alongside it; first valid answer wins.
+    # 0 = sequential.
+    hm = getattr(args, "matcher_hedge_ms", None)
+    if hm is None:
+        hm = _env_int("NEO4J_MATCHER_HEDGE_MS")
+    config["matcher_hedge_ms"] = 3700 if hm is None else max(0, min(10_000, hm))
     # Selections per matcher call. Output tokens dominate a warm call on a
     # local backend (a field deployment measured decode at 82% of it), so
     # this is the matcher's main latency lever. Ceiling = the seed limit:

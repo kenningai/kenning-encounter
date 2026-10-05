@@ -117,6 +117,20 @@ def main():
         help="OpenAI API base URL (default: https://api.openai.com/v1)",
     )
     parser.add_argument(
+        "--matcher-thinking", default=None,
+        help=(
+            "Gemini voice thinkingLevel: minimal | low | medium | high, or "
+            "empty to send none (NEO4J_MATCHER_THINKING; default empty)"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-hedge-ms", type=int, default=None,
+        help=(
+            "Start the next matcher voice alongside a lead still silent "
+            "this many ms after it began; 0 = sequential (default: 3700)"
+        ),
+    )
+    parser.add_argument(
         "--matcher-cooldown-s", type=int, default=None,
         help=(
             "Seconds a failed matcher voice is tried after the healthy ones "

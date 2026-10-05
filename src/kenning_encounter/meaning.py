@@ -57,6 +57,7 @@ can verify caching actually engaged before latency is scored.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -135,6 +136,10 @@ class Voice:
     model: str
     api_key: str = field(default="", repr=False)
     endpoint: str = ""
+    # Gemini only: a thinkingLevel to send, or "" to send none.
+    # Not part of the id: a level steers how one model works, it does not
+    # make it another author, so the sidecar it wrote stays its own.
+    thinking: str = ""
 
     @property
     def id(self) -> str:
@@ -574,6 +579,26 @@ def parse_matcher_output(
 _COMPRESS_DESC_CAP = 4000
 _COMPRESS_MAX_TOKENS = 256
 
+# On a thinking Gemini model maxOutputTokens caps reasoning AND answer
+# together; a call that spends the cap reasoning returns no answer at all.
+# So a thinking voice gets this much on top of the answer's own cap. It is
+# a ceiling, not a cost: billing is for tokens actually generated.
+_THINKING_HEADROOM = 8192
+THINKING_LEVELS = ("", "minimal", "low", "medium", "high")
+
+
+def _gemini_generation(voice: Voice, max_tokens: int) -> dict[str, Any]:
+    """generationConfig for a Gemini call. Without a thinking level this is
+    the measured flash-lite config (temperature 0). With one, temperature is
+    left at the model's default: Google's guidance for Gemini 3 models that
+    are steered by thinkingLevel is not to lower it, citing looping."""
+    if not voice.thinking:
+        return {"temperature": 0, "maxOutputTokens": max_tokens}
+    return {
+        "maxOutputTokens": max_tokens + _THINKING_HEADROOM,
+        "thinkingConfig": {"thinkingLevel": voice.thinking},
+    }
+
 # OpenAI's per-request cache routing hint. Constant, so every call from this
 # server lands where the meanings prefix is already cached.
 _OPENAI_CACHE_KEY = "kenning_encounter-matcher"
@@ -607,10 +632,7 @@ def compress_request(voice: Voice, prompt: str) -> tuple[str, dict[str, str], di
         {"x-goog-api-key": voice.api_key},
         {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0,
-                "maxOutputTokens": _COMPRESS_MAX_TOKENS,
-            },
+            "generationConfig": _gemini_generation(voice, _COMPRESS_MAX_TOKENS),
         },
     )
 
@@ -656,10 +678,7 @@ def match_request(
             {
                 "systemInstruction": {"parts": [{"text": prefix}]},
                 "contents": [{"role": "user", "parts": [{"text": tail.lstrip()}]}],
-                "generationConfig": {
-                    "temperature": 0,
-                    "maxOutputTokens": _MATCHER_MAX_OUTPUT,
-                },
+                "generationConfig": _gemini_generation(voice, _MATCHER_MAX_OUTPUT),
             },
         )
     if voice.provider == "openai":
@@ -678,10 +697,7 @@ def match_request(
         {"x-goog-api-key": voice.api_key},
         {
             "contents": [{"parts": [{"text": prefix + tail}]}],
-            "generationConfig": {
-                "temperature": 0,
-                "maxOutputTokens": _MATCHER_MAX_OUTPUT,
-            },
+            "generationConfig": _gemini_generation(voice, _MATCHER_MAX_OUTPUT),
         },
     )
 
@@ -695,7 +711,10 @@ def response_text(voice: Voice, data: dict[str, Any]) -> str:
             for c in o.get("content", []) if c.get("type") == "output_text"
         )
     parts = data["candidates"][0]["content"].get("parts", [])
-    return "".join(p.get("text", "") for p in parts)
+    # A thought part arrives only with includeThoughts, which no request
+    # here sets; skipped anyway, so a reasoning trace can never be parsed
+    # as an answer.
+    return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
 
 def response_generation(voice: Voice, data: dict[str, Any]) -> tuple[int, int]:
@@ -847,19 +866,31 @@ async def match_chain(
     include_reasons: bool = False,
     clock: Callable[[], float] = time.perf_counter,
     matcher: Callable[..., Any] | None = None,
+    hedge_ms: float | None = None,
 ) -> dict[str, Any]:
-    """Try the voices in order until one selects. One shared budget.
+    """Try the voices in lead order until one selects. One shared budget.
 
     `candidates` arrive in lead order (voice_order). Cooling voices move
     behind healthy ones. A voice runs only against ITS OWN sidecar, so a
     fallback never mixes idiolects. Returns the winning match plus `voice`,
-    `index` and `attempts` — the per-voice account of everything tried
-    before it. Raises MeaningUnavailable carrying the same account when
-    every voice fails.
+    `index` and `attempts` — the per-voice account of everything tried.
+    Raises MeaningUnavailable carrying the same account when every voice
+    fails.
+
+    HEDGING. A voice that fails starts the next one at once. A
+    voice that is merely slow starts the next one `hedge_ms` after it
+    began, both run, and the first valid selection wins; the other is
+    cancelled. A healthy call ends well inside the hedge point, while a
+    failed one tends to hang to its timeout, so waiting out the hang used
+    to spend the whole budget and leave the fallback nothing.
+    A lead overtaken by its hedge cools like a failure — losing to a call
+    started `hedge_ms` later is the hang's signature. `hedge_ms=None` is the
+    sequential chain.
 
     The budget is shared rather than per voice because the hook that waits
-    on this has one timeout (10 s by default) and the payload still has to
-    be assembled after the match."""
+    on this has one timeout and the payload still has to be assembled
+    after the match. Every launch gets only what remains, so nothing
+    outlives `timeout_ms`."""
     run = matcher or match_meanings
     ordered = (
         [c for c in candidates if not health.cooling(c[0].id)]
@@ -867,30 +898,82 @@ async def match_chain(
     )
     attempts: list[dict[str, Any]] = []
     t0 = clock()
-    for voice, index in ordered:
-        if not voice.configured:
-            attempts.append({"voice": voice.id, "error": _not_configured(voice)})
-            continue
-        remaining = timeout_ms - (clock() - t0) * 1000
-        if attempts and remaining < MIN_ATTEMPT_MS:
-            attempts.append({
-                "voice": voice.id,
-                "error": f"skipped: {remaining:.0f} ms of budget left",
-            })
-            continue
-        try:
-            prefix, names = index.prefix()
-            matched = await run(
-                prefix, names, trajectory_text, top_n, voice,
-                timeout_ms=remaining, include_reasons=include_reasons,
+
+    def elapsed_ms() -> float:
+        return (clock() - t0) * 1000
+
+    async def attempt(voice: Voice, index: MeaningIndex, budget: float):
+        prefix, names = index.prefix()
+        return await run(
+            prefix, names, trajectory_text, top_n, voice,
+            timeout_ms=budget, include_reasons=include_reasons,
+        )
+
+    pending = list(ordered)
+    running: dict[asyncio.Task, tuple[Voice, MeaningIndex, float]] = {}
+
+    def launch_next() -> None:
+        """Start the next configured voice that the budget can still buy."""
+        while pending:
+            voice, index = pending.pop(0)
+            if not voice.configured:
+                attempts.append({"voice": voice.id, "error": _not_configured(voice)})
+                continue
+            remaining = timeout_ms - elapsed_ms()
+            if attempts or running:
+                if remaining < MIN_ATTEMPT_MS:
+                    attempts.append({
+                        "voice": voice.id,
+                        "error": f"skipped: {remaining:.0f} ms of budget left",
+                    })
+                    continue
+            task = asyncio.ensure_future(attempt(voice, index, remaining))
+            running[task] = (voice, index, elapsed_ms())
+            return
+
+    launch_next()
+    try:
+        while running:
+            wait_s = None
+            if hedge_ms is not None and pending:
+                newest = max(started for _, _, started in running.values())
+                wait_s = max(0.0, (newest + hedge_ms - elapsed_ms()) / 1000)
+            done, _ = await asyncio.wait(
+                running, timeout=wait_s, return_when=asyncio.FIRST_COMPLETED,
             )
-        except MeaningUnavailable as e:
-            health.failed(voice.id)
-            attempts.append({"voice": voice.id, "error": str(e)})
-            continue
-        health.ok(voice.id)
-        attempts.append({"voice": voice.id, "ms": matched["ms"]})
-        return {**matched, "voice": voice, "index": index, "attempts": attempts}
+            if not done:
+                launch_next()  # the hedge point passed with nothing back
+                continue
+            for task in done:
+                voice, index, _ = running.pop(task)
+                try:
+                    matched = task.result()
+                except MeaningUnavailable as e:
+                    health.failed(voice.id)
+                    attempts.append({"voice": voice.id, "error": str(e)})
+                    if not running:
+                        launch_next()
+                    continue
+                health.ok(voice.id)
+                for other in list(running):
+                    loser, _, began = running.pop(other)
+                    other.cancel()
+                    health.failed(loser.id)
+                    attempts.append({
+                        "voice": loser.id,
+                        # Names no voice: this text can reach the header,
+                        # which the comparison's subject reads.
+                        "error": (
+                            "overtaken: another voice answered first, after "
+                            f"{elapsed_ms() - began:.0f} ms of waiting"
+                        ),
+                    })
+                attempts.append({"voice": voice.id, "ms": matched["ms"]})
+                return {**matched, "voice": voice, "index": index,
+                        "attempts": attempts}
+    finally:
+        for task in running:
+            task.cancel()
     reason = "; ".join(f"{a['voice']}: {a['error']}" for a in attempts) or "no voice configured"
     raise MeaningUnavailable(reason, attempts)
 

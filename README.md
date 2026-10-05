@@ -328,7 +328,10 @@ re-enters it, so integrity has to be kept rather than checked afterwards,
 and Bolt matters most because it bypasses both faces. Do not widen a binding
 to reach the graph from another machine: someone who wants to know
 something about the trajectory can ask it. Both faces also check the `Host`
-header, which refuses a web page that reaches the port by DNS rebinding.
+header, which refuses a web page that reaches the port by DNS rebinding. A
+proxy on the same host in front of the full face forwards its own name: add
+it with `KENNING_ENCOUNTER_FULL_ALLOWED_HOSTS` in `.env` (comma-separated, keeping
+`localhost,127.0.0.1`).
 If another local Neo4j already holds `7474`/`7687` (Neo4j Desktop, say), set
 `NEO4J_KENNING_ENCOUNTER_HTTP_PORT` / `NEO4J_KENNING_ENCOUNTER_BOLT_PORT` in `.env`: a host-only
 binding cannot share a port the way a `0.0.0.0` one silently could.
@@ -364,7 +367,9 @@ and accepts only the read tools (`search`, `find_by_name`,
 `trace_provenance`, `read_cypher`, `orient`, `get_schema`, and the
 vocabulary and type listings), whatever the client exposes. Every other
 tool, including the matcher tools and any added later, is absent. The
-container has no matcher keys and no sidecar volume.
+container has no matcher keys and no sidecar volume. It writes nothing,
+not even indexes at startup: the schema is the full face's to keep, so
+start the full face against a new graph first.
 
 Nothing is withheld by default: a view with pieces of the past removed is
 not a view of the trajectory. An evaluation whose author must not see your
@@ -487,8 +492,15 @@ orient and infusion both — while leaving it fully queryable.
 
 Meaning matcher: `GEMINI_API_KEY` (env only, never argv),
 `NEO4J_MATCHER_MODEL` (default `gemini-3.5-flash-lite`),
-`NEO4J_MATCHER_ENDPOINT`, `NEO4J_MATCHER_TIMEOUT_MS` (default `5000` —
-sized to the measured reasoning tail, not the median),
+`NEO4J_MATCHER_ENDPOINT`, `NEO4J_MATCHER_TIMEOUT_MS` (default `8500` — the
+whole budget for every voice tried: one hedge interval plus a full fallback
+call, each sized to the measured reasoning tail, not the median),
+`NEO4J_MATCHER_THINKING` (default empty — the Gemini voice's
+`thinkingLevel`; set `low` for a model that cannot turn thinking off, such
+as `gemini-3.8-flash`, which also refuses `minimal`),
+`NEO4J_MATCHER_HEDGE_MS` (default `3700` — a lead voice still silent this
+long after it began starts the next voice alongside it and the first valid
+answer wins; a failed lead starts it at once; `0` = sequential),
 `NEO4J_MATCHER_TOP_N` (default `12`, the most seeds infusion keeps —
 output tokens dominate a warm matcher call, so lowering this is the
 latency lever on a slow backend), and `NEO4J_MATCHER_SIDECAR` (the base

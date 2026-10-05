@@ -33,9 +33,10 @@ resolve to an ancient system interpreter):
   }
 
 Configuration: KENNING_ENCOUNTER_MCP_URL (default http://127.0.0.1:8003/mcp/) or --url;
-KENNING_ENCOUNTER_INFUSE_TIMEOUT seconds (default 10.0) or --timeout. The default budget
-covers the COLD first call of a session: rank against a cold Neo4j page cache
-costs roughly 10x the warm call, and the first prompt is exactly when
+KENNING_ENCOUNTER_INFUSE_TIMEOUT seconds (default 12.0) or --timeout. The default budget
+covers the matcher's worst case (8.5 s by default: a lead hedged at
+3.7 s, then a fallback) plus the COLD first call of a session: rank against
+a cold Neo4j page cache costs roughly 10x the warm call, and the first prompt is exactly when
 re-entry matters — a budget sized to the warm call fails silently at the one
 moment the hook exists for.
 
@@ -105,7 +106,7 @@ import time
 import urllib.request
 
 DEFAULT_URL = os.environ.get("KENNING_ENCOUNTER_MCP_URL", "http://127.0.0.1:8003/mcp/")
-TIMEOUT_S = float(os.environ.get("KENNING_ENCOUNTER_INFUSE_TIMEOUT", "10.0"))
+TIMEOUT_S = float(os.environ.get("KENNING_ENCOUNTER_INFUSE_TIMEOUT", "12.0"))
 # Trajectory (v0.9.0, the meaning matcher): full-mode selection reads the
 # session's arc, not a snapshot — meaning is temporal, and a 13-word prompt
 # under-determines it. The hook parses the harness transcript HOST-SIDE

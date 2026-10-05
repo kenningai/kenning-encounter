@@ -283,6 +283,129 @@ class TestMatchChain:
         assert "refusing" in out["attempts"][0]["error"]
 
 
+def _timed(script):
+    """script: voice_id -> (seconds, 'ok' | error). Real sleeps, so the
+    hedge's wall-clock wait is what is exercised. Records start times."""
+    import asyncio
+    import time as _t
+
+    calls = []
+    t0 = _t.perf_counter()
+
+    async def run(prefix, names, traj, top_n, voice, timeout_ms, include_reasons):
+        delay, out = script[voice.id]
+        calls.append((voice.id, round(_t.perf_counter() - t0, 2), timeout_ms))
+        await asyncio.sleep(delay)
+        if out != "ok":
+            raise MeaningUnavailable(out)
+        return {"selections": [{"name": "n1"}], "ms": delay * 1000,
+                "prompt_tokens": 100, "cached_tokens": 90, "raw": "1"}
+
+    return run, calls
+
+
+class TestHedge:
+    """A slow lead starts the fallback alongside it at hedge_ms."""
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_lead_is_overtaken_and_cools(self):
+        run, calls = _timed({OAI.id: (5.0, "ok"), GEM.id: (0.05, "ok")})
+        h = VoiceHealth()
+        out = await match_chain([(OAI, _Idx("o")), (GEM, _Idx("g"))], "t", 5,
+                                h, 8500, matcher=run, hedge_ms=200)
+        assert out["voice"] == GEM
+        assert [c[0] for c in calls] == [OAI.id, GEM.id]
+        assert 0.15 <= calls[1][1] < 1.0          # launched at the hedge point
+        assert calls[1][2] == pytest.approx(8300, abs=300)  # with what remained
+        assert out["attempts"][0]["voice"] == OAI.id
+        assert out["attempts"][0]["error"].startswith("overtaken:")
+        assert GEM.id not in out["attempts"][0]["error"]  # the header never names a voice
+        assert OAI.id not in out["attempts"][0]["error"]
+        assert out["attempts"][1] == {"voice": GEM.id, "ms": 50.0}
+        assert h.cooling(OAI.id) and not h.cooling(GEM.id)
+
+    @pytest.mark.asyncio
+    async def test_a_lead_inside_the_hedge_never_starts_the_fallback(self):
+        run, calls = _timed({OAI.id: (0.05, "ok"), GEM.id: (0.05, "ok")})
+        out = await match_chain([(OAI, _Idx("o")), (GEM, _Idx("g"))], "t", 5,
+                                VoiceHealth(), 8500, matcher=run, hedge_ms=300)
+        assert out["voice"] == OAI and [c[0] for c in calls] == [OAI.id]
+
+    @pytest.mark.asyncio
+    async def test_a_slow_lead_that_still_wins_keeps_its_answer(self):
+        # Past the hedge point but back before the fallback: lead is delivered.
+        run, calls = _timed({OAI.id: (0.3, "ok"), GEM.id: (2.0, "ok")})
+        h = VoiceHealth()
+        out = await match_chain([(OAI, _Idx("o")), (GEM, _Idx("g"))], "t", 5,
+                                h, 8500, matcher=run, hedge_ms=100)
+        assert out["voice"] == OAI and [c[0] for c in calls] == [OAI.id, GEM.id]
+        assert out["attempts"][0]["voice"] == GEM.id
+        assert out["attempts"][0]["error"].startswith("overtaken:")
+        assert not h.cooling(OAI.id)
+
+    @pytest.mark.asyncio
+    async def test_a_failing_hedge_leaves_the_lead_running(self):
+        run, calls = _timed({OAI.id: (0.4, "ok"), GEM.id: (0.05, "503")})
+        out = await match_chain([(OAI, _Idx("o")), (GEM, _Idx("g"))], "t", 5,
+                                VoiceHealth(), 8500, matcher=run, hedge_ms=100)
+        assert out["voice"] == OAI
+        assert out["attempts"] == [{"voice": GEM.id, "error": "503"},
+                                   {"voice": OAI.id, "ms": 400.0}]
+
+    @pytest.mark.asyncio
+    async def test_no_hedge_launch_when_the_budget_cannot_buy_one(self):
+        # 2000 ms budget, hedge at 1000: 1000 left < MIN_ATTEMPT_MS.
+        run, calls = _timed({OAI.id: (1.3, "ok"), GEM.id: (0.05, "ok")})
+        out = await match_chain([(OAI, _Idx("o")), (GEM, _Idx("g"))], "t", 5,
+                                VoiceHealth(), 2000, matcher=run, hedge_ms=1000)
+        assert out["voice"] == OAI and [c[0] for c in calls] == [OAI.id]
+        assert out["attempts"][0]["error"].startswith("skipped:")
+
+    @pytest.mark.asyncio
+    async def test_both_failing_raises_with_the_full_account(self):
+        run, _ = _timed({OAI.id: (0.3, "ReadTimeout"), GEM.id: (0.05, "503")})
+        with pytest.raises(MeaningUnavailable) as exc:
+            await match_chain([(OAI, _Idx("o")), (GEM, _Idx("g"))], "t", 5,
+                              VoiceHealth(), 8500, matcher=run, hedge_ms=100)
+        assert {a["voice"] for a in exc.value.attempts} == {OAI.id, GEM.id}
+
+
+class TestThinking:
+    """A Gemini voice can carry a thinkingLevel (3.8 Flash cannot
+    turn thinking off). Without one, every request is byte-identical to
+    before; with one, the cap covers reasoning plus answer and temperature
+    is left at the model default."""
+
+    FLASH = Voice("gemini", "gemini-3.8-flash", "gk", "", thinking="low")
+
+    def test_no_level_sends_no_thinking_config(self):
+        for _, _, body in (match_request(GEM, "P", "\nT"),
+                           compress_request(GEM, "x")):
+            gc = body["generationConfig"]
+            assert "thinkingConfig" not in gc and gc["temperature"] == 0
+
+    def test_a_level_is_sent_with_headroom_and_no_temperature(self):
+        _, _, m = match_request(self.FLASH, "P", "\nT")
+        _, _, c = compress_request(self.FLASH, "x")
+        for gc, answer_cap in ((m["generationConfig"], 1024),
+                               (c["generationConfig"], 256)):
+            assert gc["thinkingConfig"] == {"thinkingLevel": "low"}
+            assert "temperature" not in gc
+            assert gc["maxOutputTokens"] > answer_cap + 4000
+
+    def test_the_level_does_not_change_the_voice_id(self):
+        # Same author, same sidecar: a level steers the model, it is not
+        # another one.
+        assert self.FLASH.id == "gemini:gemini-3.8-flash"
+
+    def test_thought_parts_are_never_read_as_the_answer(self):
+        data = {"candidates": [{"content": {"parts": [
+            {"text": "12\n7\n", "thought": True},
+            {"text": "3\n4\n"},
+        ]}}]}
+        assert response_text(self.FLASH, data) == "3\n4\n"
+
+
 class TestRequests:
     def test_openai_match_shape(self):
         url, headers, body = match_request(OAI, "PREFIX", "\nTAIL")
@@ -409,6 +532,22 @@ class TestFallbackVoiceNote:
             "attempts": [{"voice": GEM.id, "ms": 900}],
         }) is None
 
+    def test_no_note_when_the_lead_delivered_after_its_hedge_failed(self):
+        # Under hedging, an error in attempts no longer implies the lead failed.
+        assert matcher_fallback_note({
+            "channel": "meaning", "lead": OAI.id, "voice": OAI.id,
+            "attempts": [{"voice": GEM.id, "error": "503"},
+                         {"voice": OAI.id, "ms": 4100}],
+        }) is None
+
+    def test_an_overtaken_lead_is_named_as_the_reason(self):
+        note = matcher_fallback_note({
+            "channel": "meaning", "lead": OAI.id, "voice": GEM.id,
+            "attempts": [{"voice": OAI.id, "error": "overtaken: answered first"},
+                         {"voice": GEM.id, "ms": 1600}],
+        })
+        assert note is not None and "overtaken" in note and OAI.id not in note
+
 
 class TestVoiceConfig:
     def _args(self, **overrides):
@@ -429,7 +568,8 @@ class TestVoiceConfig:
         for var in ("OPENAI_API_KEY", "NEO4J_MATCHER_OPENAI_MODEL",
                     "NEO4J_MATCHER_OPENAI_ENDPOINT", "NEO4J_MATCHER_LEAD",
                     "NEO4J_MATCHER_COOLDOWN_S", "NEO4J_MATCHER_SHADOW",
-                    "NEO4J_MATCHER_SHADOW_LOG", "NEO4J_MATCHER_SIDECAR"):
+                    "NEO4J_MATCHER_SHADOW_LOG", "NEO4J_MATCHER_SIDECAR",
+                    "NEO4J_MATCHER_HEDGE_MS", "NEO4J_MATCHER_TIMEOUT_MS"):
             monkeypatch.delenv(var, raising=False)
 
     def test_defaults_change_nothing_for_an_existing_deployment(self):
@@ -451,6 +591,28 @@ class TestVoiceConfig:
         assert cfg["matcher_lead"] == "alternate"
         assert cfg["matcher_shadow"] is True
         assert cfg["matcher_cooldown_s"] == 3600
+
+    def test_hedge_defaults_fit_inside_the_budget(self):
+        # The hedged fallback must still be able to buy an attempt.
+        cfg = process_config(self._args())
+        assert cfg["matcher_hedge_ms"] == 3700
+        assert cfg["matcher_timeout_ms"] == 8500
+        assert cfg["matcher_timeout_ms"] - cfg["matcher_hedge_ms"] >= MIN_ATTEMPT_MS
+
+    def test_hedge_env_zero_means_sequential_and_is_clamped(self, monkeypatch):
+        monkeypatch.setenv("NEO4J_MATCHER_HEDGE_MS", "0")
+        assert process_config(self._args())["matcher_hedge_ms"] == 0
+        monkeypatch.setenv("NEO4J_MATCHER_HEDGE_MS", "99999")
+        assert process_config(self._args())["matcher_hedge_ms"] == 10_000
+
+    def test_thinking_defaults_to_none_and_refuses_an_unknown_level(self, monkeypatch):
+        monkeypatch.delenv("NEO4J_MATCHER_THINKING", raising=False)
+        assert process_config(self._args())["matcher_thinking"] == ""
+        monkeypatch.setenv("NEO4J_MATCHER_THINKING", "Low")
+        assert process_config(self._args())["matcher_thinking"] == "low"
+        monkeypatch.setenv("NEO4J_MATCHER_THINKING", "off")
+        with pytest.raises(ValueError):
+            process_config(self._args())
 
     def test_unknown_lead_falls_back_to_gemini(self, monkeypatch):
         monkeypatch.setenv("NEO4J_MATCHER_LEAD", "claude")

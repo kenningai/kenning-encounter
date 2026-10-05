@@ -2,7 +2,7 @@
 """Build the meaning sidecar — compressed node meanings for the matcher.
 
 Offline batch (latency irrelevant): reads every semantic + reference node
-(name + description, NOT Encounters) from Neo4j read-only, compresses each
+(name + description, never the process layer) from Neo4j read-only, compresses each
 through one VOICE — the same model that will match against it, which is
 load-bearing: single-voice authorship is what kills the two-idiolect
 problem — and writes that voice's stamped sidecar beside --out
@@ -68,12 +68,19 @@ def _env_from_dotenv() -> None:
 async def _fetch_nodes(uri: str, user: str, password: str, database: str):
     from neo4j import AsyncGraphDatabase, RoutingControl
 
+    from kenning_encounter.kenning_encounter import not_process_node
+
     driver = AsyncGraphDatabase.driver(uri, auth=(user, password), database=database)
     try:
         res = await driver.execute_query(
-            "MATCH (n) WHERE NOT n:Encounter AND n.name IS NOT NULL "
+            # The server's reconcile query, so a bulk build and a startup
+            # sweep agree on the corpus (no process layer: Locus as well as
+            # Encounter) and on its order (creation order numbers a voice's
+            # sidecar the way the server would have built it from empty).
+            f"MATCH (n) WHERE {not_process_node('n')} AND n.name IS NOT NULL "
             "RETURN n.name AS name, labels(n)[0] AS type, "
-            "       coalesce(n.description, '') AS description ORDER BY name",
+            "       coalesce(n.description, '') AS description "
+            "ORDER BY n.t_created, n.name",
             routing_=RoutingControl.READ,
         )
         return [dict(r) for r in res.records]
@@ -105,6 +112,13 @@ async def main() -> int:
         help="Model for the voice (default: the provider's matcher default)",
     )
     parser.add_argument(
+        "--thinking", default=None,
+        help=(
+            "Gemini thinkingLevel (minimal|low|medium|high); default "
+            "NEO4J_MATCHER_THINKING, else none. Use the level the server runs."
+        ),
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Recompute every node, ignoring content hashes",
     )
@@ -116,7 +130,12 @@ async def main() -> int:
     if not api_key:
         print(f"{key_env} not set (env or .env)", file=sys.stderr)
         return 1
-    voice = Voice(args.provider, args.model or DEFAULT_MODELS[args.provider], api_key)
+    thinking = (
+        args.thinking if args.thinking is not None
+        else os.environ.get("NEO4J_MATCHER_THINKING", "")
+    ).strip().lower() if args.provider == "gemini" else ""
+    voice = Voice(args.provider, args.model or DEFAULT_MODELS[args.provider],
+                  api_key, thinking=thinking)
 
     uri = args.db_url or os.environ.get("NEO4J_URL") or "bolt://localhost:7687"
     password = (
@@ -127,7 +146,7 @@ async def main() -> int:
     database = os.environ.get("NEO4J_DATABASE", "kenning_encounter")
 
     nodes = await _fetch_nodes(uri, user, password, database)
-    print(f"corpus: {len(nodes)} nodes (semantic + reference, no Encounters)")
+    print(f"corpus: {len(nodes)} nodes (semantic + reference, no process layer)")
 
     out_path = sidecar_path(args.out, voice)
     index = MeaningIndex(out_path, voice.id)

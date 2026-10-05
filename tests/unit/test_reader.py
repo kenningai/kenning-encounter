@@ -212,3 +212,34 @@ class TestProfileConfig:
 
         with pytest.raises(SystemExit):
             process_config(self._args(server_profile="admin"))
+
+
+class _SchemaSpy:
+    """Records every schema write a face attempts at startup."""
+
+    def __init__(self):
+        self.writes = []
+
+    async def create_fulltext_index(self):
+        self.writes.append("fulltext")
+
+    async def create_indexes(self):
+        self.writes.append("indexes")
+
+
+class TestReaderStartupWritesNothing:
+    """A reader that writes, even only at startup, is not a reader."""
+
+    @pytest.mark.asyncio
+    async def test_the_reader_face_writes_no_schema(self):
+        from kenning_encounter.server import prepare_schema
+        spy = _SchemaSpy()
+        assert await prepare_schema(spy, "reader") is False
+        assert spy.writes == []
+
+    @pytest.mark.asyncio
+    async def test_the_full_face_still_prepares_the_schema(self):
+        from kenning_encounter.server import prepare_schema
+        spy = _SchemaSpy()
+        assert await prepare_schema(spy, "full") is True
+        assert spy.writes == ["fulltext", "indexes"]
