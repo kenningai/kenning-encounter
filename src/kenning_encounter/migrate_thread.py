@@ -45,6 +45,7 @@ touches nothing else. Nothing in this substrate is deleted.
 from __future__ import annotations
 
 import argparse
+import bisect
 import heapq
 import os
 import sys
@@ -220,14 +221,25 @@ def gate(
 
 def seal_ticks(order: list[str], encs: dict[str, dict[str, Any]]) -> dict[str, int]:
     """For each stamped seal, the latest tick whose opening came at or before
-    it. Never earlier than the encounter's own tick. Unstamped seals: absent."""
+    it. Never earlier than the encounter's own tick. Unstamped seals: absent.
+
+    O(n log n): this runs inside the transaction that holds the advance
+    lock, so a per-seal scan of the thread would stall every opening on a
+    long history. Structure can place an encounter before one it was
+    stamped after, so tick is not monotone in stamp: hence the running
+    maximum over openings sorted by stamp, searched once per seal."""
+    pos = {e: i for i, e in enumerate(order)}
+    by_stamp = sorted(order, key=lambda x: tuple(encs[x]["t"]))
+    stamps = [tuple(encs[x]["t"]) for x in by_stamp]
+    reach: list[int] = []
+    for x in by_stamp:
+        reach.append(max(reach[-1], pos[x]) if reach else pos[x])
     out: dict[str, int] = {}
     for eid, e in encs.items():
         if e.get("ts") is None:
             continue
-        ts = tuple(e["ts"])
-        latest = max(i for i, x in enumerate(order) if tuple(encs[x]["t"]) <= ts or x == eid)
-        out[eid] = max(latest, order.index(eid))
+        k = bisect.bisect_right(stamps, tuple(e["ts"]))
+        out[eid] = max(reach[k - 1], pos[eid]) if k else pos[eid]
     return out
 
 

@@ -72,3 +72,72 @@ def test_the_migration_writes_nothing_but_the_thread():
         assert "REMOVE" not in w.upper()
     assert "rebuilt_from = 't_exist'" in mt.WRITE_EDGES
     assert "seal_tick_rebuilt_from = 't_sealed'" in mt.WRITE_SEALS
+
+
+def _seal_ticks_by_scan(order, encs):
+    """The definition, read literally: O(n^2), kept only as the oracle."""
+    out = {}
+    for eid, e in encs.items():
+        if e.get("ts") is None:
+            continue
+        ts = tuple(e["ts"])
+        latest = max(i for i, x in enumerate(order) if tuple(encs[x]["t"]) <= ts or x == eid)
+        out[eid] = max(latest, order.index(eid))
+    return out
+
+
+def _shuffled_history(rng, n):
+    """Stamps deliberately out of thread order, with ties, so the running
+    maximum is what carries the answer rather than the sort alone."""
+    order = [f"E{i}" for i in range(n)]
+    encs = {}
+    for e in order:
+        t = [rng.randrange(n // 2 + 1), 0]
+        ts = None if rng.random() < 0.3 else [t[0] + rng.randrange(-2, n // 3 + 1), 0]
+        encs[e] = {"locus": "L", "t": t, "ts": ts}
+    return order, encs
+
+
+def test_seal_ticks_agrees_with_its_definition_on_shuffled_histories():
+    import random
+    rng = random.Random(20261006)
+    for n in (1, 2, 5, 40, 300):
+        for _ in range(20):
+            order, encs = _shuffled_history(rng, n)
+            assert mt.seal_ticks(order, encs) == _seal_ticks_by_scan(order, encs)
+
+
+def test_the_agreement_check_can_fail():
+    """Two-sided: dropping the running maximum (taking the last stamp's own
+    tick) must disagree with the definition somewhere in the same corpus."""
+    import bisect
+    import random
+
+    def no_running_max(order, encs):
+        pos = {e: i for i, e in enumerate(order)}
+        by_stamp = sorted(order, key=lambda x: tuple(encs[x]["t"]))
+        stamps = [tuple(encs[x]["t"]) for x in by_stamp]
+        out = {}
+        for eid, e in encs.items():
+            if e.get("ts") is None:
+                continue
+            k = bisect.bisect_right(stamps, tuple(e["ts"]))
+            out[eid] = max(pos[by_stamp[k - 1]], pos[eid]) if k else pos[eid]
+        return out
+
+    rng = random.Random(20261006)
+    histories = [_shuffled_history(rng, 40) for _ in range(20)]
+    assert any(no_running_max(o, e) != _seal_ticks_by_scan(o, e) for o, e in histories)
+
+
+def test_seal_ticks_scales_to_a_long_history():
+    """A long synthetic history, every opening sealed: the scan would be ~2.5e9 steps."""
+    import random
+    import time
+    rng = random.Random(7)
+    order, encs = _shuffled_history(rng, 50_000)
+    for e in encs.values():
+        e["ts"] = e["ts"] or [e["t"][0] + 1, 0]
+    start = time.perf_counter()
+    mt.seal_ticks(order, encs)
+    assert time.perf_counter() - start < 2.0

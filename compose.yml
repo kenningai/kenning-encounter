@@ -78,7 +78,7 @@ services:
 
   kenning_encounter:
     build: .
-    image: kenning-encounter:0.15.0
+    image: kenning-encounter:0.15.1
     container_name: kenning_encounter-mcp
     depends_on:
       neo4j:
@@ -185,7 +185,7 @@ services:
   # Direct reading is for the keeper's own work; anyone else asks.
   kenning_encounter-reader:
     build: .
-    image: kenning-encounter:0.15.0
+    image: kenning-encounter:0.15.1
     container_name: kenning_encounter-reader
     depends_on:
       neo4j:
