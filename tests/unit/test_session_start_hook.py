@@ -30,3 +30,5 @@ def test_the_process_never_fails_the_session_start():
     r = subprocess.run([sys.executable, str(HOOK)], input="garbage",
                        capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.startswith("Re-entry:")
+
+

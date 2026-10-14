@@ -283,18 +283,33 @@ def process_config(args: argparse.Namespace) -> dict[str, Any]:
         or os.getenv("NEO4J_MATCHER_OPENAI_ENDPOINT")
         or "https://api.openai.com/v1"
     )
-    # Which voice leads: gemini | openai | alternate (chosen per locus from
-    # the session id, so a comparison between voices can be made in the
-    # window). Unknown values fall back to gemini, the pre-v0.17.0 voice,
-    # rather than refusing to start over a typo in an infusion setting.
+    # The third voice (v0.22.0): an Anthropic model, on the same terms as
+    # the second. Key from ANTHROPIC_API_KEY, env only; with no key the
+    # voice is absent and nothing changes.
+    config["matcher_anthropic_api_key"] = os.getenv("ANTHROPIC_API_KEY") or ""
+    config["matcher_anthropic_model"] = (
+        getattr(args, "matcher_anthropic_model", None)
+        or os.getenv("NEO4J_MATCHER_ANTHROPIC_MODEL")
+        or "claude-haiku-5-5"
+    )
+    config["matcher_anthropic_endpoint"] = (
+        getattr(args, "matcher_anthropic_endpoint", None)
+        or os.getenv("NEO4J_MATCHER_ANTHROPIC_ENDPOINT")
+        or "https://api.anthropic.com/v1"
+    )
+    # Which voice leads: gemini | openai | anthropic | alternate (chosen per
+    # locus from the session id, so a comparison between voices can be made
+    # in the window). Unknown values fall back to gemini, the pre-v0.17.0
+    # voice, rather than refusing to start over a typo in an infusion setting.
     lead = (
         getattr(args, "matcher_lead", None)
         or os.getenv("NEO4J_MATCHER_LEAD")
         or "gemini"
     ).strip().lower()
-    if lead not in ("gemini", "openai", "alternate"):
+    if lead not in ("gemini", "openai", "anthropic", "alternate"):
         logger.warning(
-            f"NEO4J_MATCHER_LEAD={lead!r} is not gemini|openai|alternate; using gemini"
+            f"NEO4J_MATCHER_LEAD={lead!r} is not gemini|openai|anthropic|alternate; "
+            "using gemini"
         )
         lead = "gemini"
     config["matcher_lead"] = lead

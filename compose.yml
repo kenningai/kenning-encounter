@@ -78,7 +78,7 @@ services:
 
   kenning_encounter:
     build: .
-    image: kenning-encounter:0.15.1
+    image: kenning-encounter:0.16.0
     container_name: kenning_encounter-mcp
     depends_on:
       neo4j:
@@ -121,10 +121,11 @@ services:
       # node meanings and matches against them, and each keeps its own
       # sidecar, stamped by the voice that wrote it and refused by any
       # other. GEMINI_API_KEY enables the Gemini voice, OPENAI_API_KEY the
-      # OpenAI one. NEO4J_MATCHER_LEAD picks which leads (gemini | openai |
+      # OpenAI one, ANTHROPIC_API_KEY the Anthropic one (v0.22.0).
+      # NEO4J_MATCHER_LEAD picks which leads (gemini | openai | anthropic |
       # alternate — the last chosen per locus from the session id); the
-      # other is the fallback, inside one shared budget. A voice that fails
-      # is tried after the healthy one for NEO4J_MATCHER_COOLDOWN_S. Which
+      # others are the fallbacks, inside one shared budget. A voice that fails
+      # is tried after the healthy ones for NEO4J_MATCHER_COOLDOWN_S. Which
       # voice should lead is not settled: it has not been measured.
       #
       # HEDGE. A failed lead starts the fallback at once; a lead still
@@ -145,6 +146,12 @@ services:
       NEO4J_MATCHER_THINKING: "${NEO4J_MATCHER_THINKING:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       NEO4J_MATCHER_OPENAI_MODEL: "${NEO4J_MATCHER_OPENAI_MODEL:-gpt-6-luna}"
+      # The Anthropic voice runs as the model ships: no thinking or effort
+      # setting (with thinking disabled it stops selecting over a full
+      # prefix), and the model's default sampling, since current Haiku
+      # models refuse any other temperature. Expect several seconds a call.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      NEO4J_MATCHER_ANTHROPIC_MODEL: "${NEO4J_MATCHER_ANTHROPIC_MODEL:-claude-haiku-5-5}"
       NEO4J_MATCHER_LEAD: "${NEO4J_MATCHER_LEAD:-gemini}"
       NEO4J_MATCHER_COOLDOWN_S: "${NEO4J_MATCHER_COOLDOWN_S:-300}"
       NEO4J_MATCHER_TIMEOUT_MS: "${NEO4J_MATCHER_TIMEOUT_MS:-8500}"
@@ -185,7 +192,7 @@ services:
   # Direct reading is for the keeper's own work; anyone else asks.
   kenning_encounter-reader:
     build: .
-    image: kenning-encounter:0.15.1
+    image: kenning-encounter:0.16.0
     container_name: kenning_encounter-reader
     depends_on:
       neo4j:

@@ -16,6 +16,9 @@ import pytest
 from kenning_encounter.infuse import matcher_fallback_note
 from kenning_encounter.meaning import (
     MIN_ATTEMPT_MS,
+    SELECTIONS_KEY,
+    SHAPES,
+    STRUCTURED,
     MeaningIndex,
     MeaningUnavailable,
     Voice,
@@ -25,6 +28,7 @@ from kenning_encounter.meaning import (
     match_request,
     response_text,
     response_usage,
+    selection_schema,
     shadow_record,
     sidecar_path,
     voice_order,
@@ -34,6 +38,7 @@ from kenning_encounter.utils import process_config
 
 GEM = Voice("gemini", "gemini-3.5-flash-lite", "gk", "")
 OAI = Voice("openai", "gpt-6-luna", "ok", "")
+ANT = Voice("anthropic", "claude-haiku-5-5", "ak", "")
 
 
 def _write(path, voice, nodes):
@@ -382,7 +387,7 @@ class TestThinking:
         for _, _, body in (match_request(GEM, "P", "\nT"),
                            compress_request(GEM, "x")):
             gc = body["generationConfig"]
-            assert "thinkingConfig" not in gc and gc["temperature"] == 0
+            assert "thinkingConfig" not in gc and "temperature" not in gc
 
     def test_a_level_is_sent_with_headroom_and_no_temperature(self):
         _, _, m = match_request(self.FLASH, "P", "\nT")
@@ -426,7 +431,8 @@ class TestRequests:
         assert headers == {"x-goog-api-key": "gk"}
         assert body["systemInstruction"]["parts"][0]["text"] == "PREFIX"
         assert body["contents"][0]["parts"][0]["text"] == "TAIL"
-        assert body["generationConfig"]["temperature"] == 0
+        # Ignored by current Gemini models and refused by later ones.
+        assert "temperature" not in body["generationConfig"]
 
     def test_gemini_flat_is_still_available_for_comparison(self):
         _, _, body = match_request(GEM, "PREFIX", "\nTAIL", shape="flat")
@@ -447,6 +453,47 @@ class TestRequests:
     def test_unknown_shape_is_refused(self):
         with pytest.raises(ValueError):
             match_request(GEM, "P", "T", shape="sideways")
+
+    def test_plain_requests_carry_no_schema(self):
+        assert "responseFormat" not in match_request(GEM, "P", "T")[2]["generationConfig"]
+        assert "format" not in match_request(OAI, "P", "T")[2]["text"]
+
+    def test_gemini_structured_answer_is_a_list_of_exactly_n_integers(self):
+        for shape in SHAPES:
+            gc = match_request(GEM, "P", "T", shape=shape, structured=12)[2]["generationConfig"]
+            assert gc["responseFormat"] == {"text": {
+                "mimeType": "APPLICATION_JSON",
+                "schema": {"type": "array", "items": {"type": "integer"},
+                           "minItems": 12, "maxItems": 12},
+            }}
+
+    def test_structure_leaves_the_rest_of_the_request_alone(self):
+        flash = Voice("gemini", "gemini-3.8-flash", "gk", "", thinking="low")
+        for voice in (GEM, flash, OAI):
+            plain = match_request(voice, "P", "T")[2]
+            held = match_request(voice, "P", "T", structured=5)[2]
+            held.get("generationConfig", {}).pop("responseFormat", None)
+            held.get("text", {}).pop("format", None)
+            assert held == plain
+
+    def test_openai_structured_answer_is_a_strict_object(self):
+        # A strict schema needs an object at the root; the list sits under
+        # the key the parser reads.
+        text = match_request(OAI, "P", "T", structured=12)[2]["text"]
+        assert text["verbosity"] == "low"
+        fmt = text["format"]
+        assert fmt["type"] == "json_schema" and fmt["strict"] is True
+        assert fmt["schema"]["required"] == [SELECTIONS_KEY]
+        assert fmt["schema"]["additionalProperties"] is False
+        assert fmt["schema"]["properties"][SELECTIONS_KEY] == selection_schema(12)
+
+    def test_a_voice_with_no_structured_form_is_refused(self):
+        with pytest.raises(ValueError):
+            match_request(ANT, "P", "T", structured=12)
+
+    def test_which_voices_are_held_to_a_schema(self):
+        # Only the voice measured to need it.
+        assert STRUCTURED == {"gemini": True, "openai": False, "anthropic": False}
 
     def test_reasoning_is_read_per_call(self):
         from kenning_encounter.meaning import response_generation
@@ -482,6 +529,146 @@ class TestRequests:
                 "usageMetadata": {"promptTokenCount": 10, "cachedContentTokenCount": 8}}
         assert response_text(GEM, data) == "2"
         assert response_usage(GEM, data) == (10, 8)
+
+
+class TestAnthropicVoice:
+    """The third voice: run as the model ships (no thinking setting, no
+    effort setting, no sampling parameter), with the meanings prefix behind
+    a cache breakpoint in both shapes."""
+
+    def test_default_endpoint_and_its_own_sidecar(self):
+        assert ANT.base == "https://api.anthropic.com/v1"
+        names = {sidecar_path("models/meaning_sidecar.json", v).name for v in (GEM, OAI, ANT)}
+        assert len(names) == 3
+        assert "meaning_sidecar.anthropic-claude-haiku-5-5.json" in names
+
+    def test_split_puts_the_prefix_in_the_system_prompt(self):
+        url, headers, body = match_request(ANT, "PREFIX", "\nTAIL")
+        assert url == "https://api.anthropic.com/v1/messages"
+        assert headers == {"x-api-key": "ak", "anthropic-version": "2023-06-01"}
+        assert body["model"] == "claude-haiku-5-5"
+        (system,) = body["system"]
+        assert system["text"] == "PREFIX" and system["cache_control"]["type"] == "ephemeral"
+        assert body["messages"] == [{"role": "user", "content": "TAIL"}]
+        assert match_request(ANT, "P", "\nT") == match_request(ANT, "P", "\nT", shape="split")
+
+    def test_flat_keeps_the_breakpoint_on_the_prefix_block(self):
+        _, _, body = match_request(ANT, "PREFIX", "\nTAIL", shape="flat")
+        assert "system" not in body
+        (turn,) = body["messages"]
+        prefix, tail = turn["content"]
+        assert prefix["text"] == "PREFIX" and "cache_control" in prefix
+        assert tail == {"type": "text", "text": "\nTAIL"}
+
+    def test_no_sampling_parameter_is_ever_sent(self):
+        # The model refuses a non-default value, so none may appear.
+        for body in (match_request(ANT, "P", "T")[2],
+                     match_request(ANT, "P", "T", shape="flat")[2],
+                     compress_request(ANT, "P")[2]):
+            assert not {"temperature", "top_p", "top_k"} & set(body)
+
+    def test_compress_shape(self):
+        url, _, body = compress_request(ANT, "P")
+        assert url.endswith("/messages")
+        assert body["messages"] == [{"role": "user", "content": "P"}]
+
+    def test_nothing_is_imposed_on_how_the_model_thinks(self):
+        # v0.22.0 disabled thinking and the voice stopped selecting. No
+        # request may carry a thinking or effort setting, and each leaves
+        # room for thinking inside the output cap.
+        from kenning_encounter.meaning import _COMPRESS_MAX_TOKENS, _MATCHER_MAX_OUTPUT
+
+        for body, answer_cap in ((match_request(ANT, "P", "T")[2], _MATCHER_MAX_OUTPUT),
+                                 (match_request(ANT, "P", "T", shape="flat")[2], _MATCHER_MAX_OUTPUT),
+                                 (compress_request(ANT, "P")[2], _COMPRESS_MAX_TOKENS)):
+            assert "thinking" not in body and "output_config" not in body
+            assert body["max_tokens"] > answer_cap
+
+    def test_response_parsing_reads_text_blocks_by_type(self):
+        from kenning_encounter.meaning import response_generation
+
+        data = {
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "s"},
+                {"type": "text", "text": "3\n"},
+                {"type": "text", "text": "1"},
+            ],
+            "usage": {"input_tokens": 40, "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 90000, "output_tokens": 280,
+                      "output_tokens_details": {"thinking_tokens": 105}},
+        }
+        assert response_text(ANT, data) == "3\n1"
+        assert response_usage(ANT, data) == (90040, 90000)
+        assert response_generation(ANT, data) == (280, 105)
+        del data["usage"]["output_tokens_details"]
+        assert response_generation(ANT, data) == (280, 0)
+
+    def test_a_cache_write_counts_as_prompt_but_not_as_cached(self):
+        data = {"content": [], "usage": {"input_tokens": 40,
+                "cache_creation_input_tokens": 90000, "cache_read_input_tokens": 0}}
+        assert response_usage(ANT, data) == (90040, 0)
+
+    def test_a_refusal_is_named_and_an_ordinary_answer_is_not(self):
+        with pytest.raises(ValueError, match="declined"):
+            response_text(ANT, {"stop_reason": "refusal", "content": []})
+        assert response_text(ANT, {"stop_reason": "end_turn",
+                                   "content": [{"type": "text", "text": "7"}]}) == "7"
+
+    def test_named_lead_goes_first_among_three(self):
+        assert [v.provider for v in voice_order([GEM, OAI, ANT], "anthropic", None)] == [
+            "anthropic", "gemini", "openai"]
+        seen = {voice_order([GEM, OAI, ANT], "alternate", f"s{i}")[0].provider
+                for i in range(40)}
+        assert seen == {"gemini", "openai", "anthropic"}
+
+
+class TestOrdinalAnswer:
+    """A voice that answers 1, 2, 3 ... has declined the task in the shape
+    of an answer. Reported by a match, refused by the live chain."""
+
+    NAMES = [f"n{i}" for i in range(40)]
+
+    def _sel(self, idx):
+        return [{"name": self.NAMES[i]} for i in idx]
+
+    def test_the_head_of_the_list_in_order_is_ordinal(self):
+        from kenning_encounter.meaning import ordinal_answer
+
+        assert ordinal_answer(self._sel(range(12)), self.NAMES)
+        assert ordinal_answer(self._sel(range(30)), self.NAMES)
+
+    def test_a_real_selection_is_not(self):
+        from kenning_encounter.meaning import ordinal_answer
+
+        assert not ordinal_answer(self._sel([0, 1, 2, 3, 9]), self.NAMES)
+        assert not ordinal_answer(self._sel([1, 0, 2, 3, 4]), self.NAMES)
+        assert not ordinal_answer(self._sel([5, 6, 7, 8, 9]), self.NAMES)
+        assert not ordinal_answer(self._sel(range(4)), self.NAMES)
+
+    @pytest.mark.asyncio
+    async def test_the_chain_refuses_it_and_falls_to_the_next_voice(self):
+        async def matcher(prefix, names, text, top_n, voice, **kw):
+            ordinal = voice.provider == "gemini"
+            return {"selections": [{"name": "x"}], "ordinal": ordinal, "ms": 1.0,
+                    "prompt_tokens": 1, "cached_tokens": 0}
+
+        out = await match_chain(
+            [(GEM, _Idx("g")), (OAI, _Idx("o"))], "t", 12, VoiceHealth(), timeout_ms=8000,
+            matcher=matcher,
+        )
+        assert out["voice"] is OAI
+        assert "head of the list" in out["attempts"][0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_every_voice_ordinal_is_no_match_at_all(self):
+        async def matcher(prefix, names, text, top_n, voice, **kw):
+            return {"selections": [{"name": "x"}], "ordinal": True, "ms": 1.0,
+                    "prompt_tokens": 1, "cached_tokens": 0}
+
+        with pytest.raises(MeaningUnavailable):
+            await match_chain([(GEM, _Idx("g"))], "t", 12, VoiceHealth(), timeout_ms=8000,
+                              matcher=matcher)
 
 
 class TestShadowRecord:
@@ -565,7 +752,9 @@ class TestVoiceConfig:
 
     @pytest.fixture(autouse=True)
     def _clean(self, monkeypatch):
-        for var in ("OPENAI_API_KEY", "NEO4J_MATCHER_OPENAI_MODEL",
+        for var in ("ANTHROPIC_API_KEY", "NEO4J_MATCHER_ANTHROPIC_MODEL",
+                    "NEO4J_MATCHER_ANTHROPIC_ENDPOINT",
+                    "OPENAI_API_KEY", "NEO4J_MATCHER_OPENAI_MODEL",
                     "NEO4J_MATCHER_OPENAI_ENDPOINT", "NEO4J_MATCHER_LEAD",
                     "NEO4J_MATCHER_COOLDOWN_S", "NEO4J_MATCHER_SHADOW",
                     "NEO4J_MATCHER_SHADOW_LOG", "NEO4J_MATCHER_SIDECAR",
@@ -617,6 +806,17 @@ class TestVoiceConfig:
     def test_unknown_lead_falls_back_to_gemini(self, monkeypatch):
         monkeypatch.setenv("NEO4J_MATCHER_LEAD", "claude")
         assert process_config(self._args())["matcher_lead"] == "gemini"
+
+    def test_the_anthropic_voice_is_absent_without_a_key(self, monkeypatch):
+        cfg = process_config(self._args())
+        assert cfg["matcher_anthropic_api_key"] == ""
+        assert cfg["matcher_anthropic_model"] == "claude-haiku-5-5"
+        assert cfg["matcher_anthropic_endpoint"] == "https://api.anthropic.com/v1"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setenv("NEO4J_MATCHER_LEAD", "Anthropic")
+        cfg = process_config(self._args())
+        assert cfg["matcher_anthropic_api_key"] == "sk-ant-test"
+        assert cfg["matcher_lead"] == "anthropic"
 
     def test_shadow_log_sits_beside_the_sidecar(self, monkeypatch):
         monkeypatch.setenv("NEO4J_MATCHER_SIDECAR", "/app/models/meaning_sidecar.json")

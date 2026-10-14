@@ -42,7 +42,7 @@ STATUS AND BOUNDARIES (shipped in v0.9.0 after the T0 gates passed — recall
 
 VOICES (v0.17.0). A voice is one model that BOTH compresses a sidecar and
 matches against it — single-voice authorship stated as a type. More than one
-voice may be configured (Gemini and OpenAI today); each keeps its OWN sidecar,
+voice may be configured (Gemini, OpenAI and Anthropic today); each keeps its OWN sidecar,
 stamped with the voice that wrote it, and the index refuses a sidecar stamped
 by any other voice. One voice leads and the others are fallbacks; which one
 leads is configuration, not a judgment written into the code, because which
@@ -88,12 +88,15 @@ MATCHER_HEADER = (
     "recent last, followed by the selection request. Select the nodes "
     "whose meaning most bears on the current moment of the trajectory — "
     "including nodes whose relevance is an unnamed constraint on the "
-    "situation rather than its topic. Output one line per selection, best "
-    "first: the node number, then a space-dash-space, then a one-line "
-    "reason. Numbers must come from the collection. No other text.\n\n"
+    "situation rather than its topic. Numbers must come from the "
+    "collection. No other text.\n\n"
     "NODE MEANINGS:\n"
 )
 
+# The header says nothing about the answer's form; the selection request at
+# the end of the call does. Through v0.22.1 it asked for a reason after each
+# number while the default request asked for numbers only, and a voice was
+# free to follow either.
 _MAX_TURN_CHARS = 2000        # per-turn cap before budgeting
 _DIGEST_SNIP_CHARS = 200      # older-half turns snip to this in the digest
 _MATCHER_MAX_OUTPUT = 1024    # ~30 lines of number+reason; flash-lite thinks 0
@@ -114,13 +117,22 @@ class MeaningUnavailable(Exception):
 
 # -- Voices -------------------------------------------------------------------
 
-PROVIDERS = ("gemini", "openai")
+PROVIDERS = ("gemini", "openai", "anthropic")
 DEFAULT_ENDPOINTS = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta",
     "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
 }
-DEFAULT_MODELS = {"gemini": "gemini-3.5-flash-lite", "openai": "gpt-6-luna"}
-KEY_ENV = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY"}
+DEFAULT_MODELS = {
+    "gemini": "gemini-3.5-flash-lite",
+    "openai": "gpt-6-luna",
+    "anthropic": "claude-haiku-5-5",
+}
+KEY_ENV = {
+    "gemini": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
 
 
 @dataclass(frozen=True)
@@ -551,27 +563,48 @@ def user_turns_from_transcript(path: str | Path, n: int) -> list[str]:
 def parse_matcher_output(
     raw: str, ordered_names: list[str], top_n: int
 ) -> list[dict[str, Any]]:
-    """Numbered lines -> [{name, reason}], best first, deduped, capped.
+    """Numbered lines, or a structured answer's JSON list, ->
+    [{name, reason}], best first, deduped, capped.
 
     Numbers outside the collection are dropped, not guessed at. An empty
     result means MALFORMED and the caller falls back."""
+    picked = _json_selections(raw)
+    if picked is None:
+        picked = [
+            (int(m.group(1)), m.group(2).strip())
+            for m in map(_LINE_RE.match, (raw or "").splitlines()) if m
+        ]
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for line in (raw or "").splitlines():
-        m = _LINE_RE.match(line)
-        if not m:
-            continue
-        idx = int(m.group(1))
+    for idx, reason in picked:
         if not 1 <= idx <= len(ordered_names):
             continue
         name = ordered_names[idx - 1]
         if name in seen:
             continue
         seen.add(name)
-        out.append({"name": name, "reason": m.group(2).strip()})
+        out.append({"name": name, "reason": reason})
         if len(out) >= top_n:
             break
     return out
+
+
+def _json_selections(raw: str) -> list[tuple[int, str]] | None:
+    """The numbers of a structured answer: a JSON list of integers, or an
+    object holding one under SELECTIONS_KEY. None when the text is not that,
+    so the caller reads it as lines. A JSON answer carries no reasons."""
+    text = (raw or "").strip()
+    if not text.startswith(("[", "{")):
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        data = data.get(SELECTIONS_KEY)
+    if not isinstance(data, list):
+        return None
+    return [(n, "") for n in data if isinstance(n, int) and not isinstance(n, bool)]
 
 
 # -- The generation calls -----------------------------------------------------
@@ -588,12 +621,13 @@ THINKING_LEVELS = ("", "minimal", "low", "medium", "high")
 
 
 def _gemini_generation(voice: Voice, max_tokens: int) -> dict[str, Any]:
-    """generationConfig for a Gemini call. Without a thinking level this is
-    the measured flash-lite config (temperature 0). With one, temperature is
-    left at the model's default: Google's guidance for Gemini 3 models that
-    are steered by thinkingLevel is not to lower it, citing looping."""
+    """generationConfig for a Gemini call. No temperature is sent, with or
+    without a thinking level: Google's current Flash and Flash-Lite models
+    ignore it, and its documentation says later models will refuse it. So a
+    Gemini voice samples at its default and cannot be pinned.
+    (Through v0.22.1 a voice with no thinking level was sent temperature 0.)"""
     if not voice.thinking:
-        return {"temperature": 0, "maxOutputTokens": max_tokens}
+        return {"maxOutputTokens": max_tokens}
     return {
         "maxOutputTokens": max_tokens + _THINKING_HEADROOM,
         "thinkingConfig": {"thinkingLevel": voice.thinking},
@@ -609,7 +643,7 @@ def _openai_base(voice: Voice, max_tokens: int) -> dict[str, Any]:
     (llm-triage profile_openai.py, 2026-10-01): no reasoning (0.9 s p50 vs
     2.9 s at the default effort, every answer parsed), low verbosity, and
     nothing stored at the provider. temperature is accepted only at effort
-    none; 0 matches the Gemini voice."""
+    none, and this is the one voice it can be set for."""
     return {
         "model": voice.model,
         "store": False,
@@ -620,8 +654,41 @@ def _openai_base(voice: Voice, max_tokens: int) -> dict[str, Any]:
     }
 
 
+_ANTHROPIC_VERSION = "2023-06-01"
+# The meanings prefix is cached for an hour, not the default five minutes:
+# prompts arrive at the pace of a person's turns, and a prefix that has gone
+# cold is re-read whole on the next one.
+_ANTHROPIC_CACHE = {"type": "ephemeral", "ttl": "1h"}
+
+
+def _anthropic_headers(voice: Voice) -> dict[str, str]:
+    return {"x-api-key": voice.api_key, "anthropic-version": _ANTHROPIC_VERSION}
+
+
+def _anthropic_base(voice: Voice, max_tokens: int) -> dict[str, Any]:
+    """The Anthropic voice runs as the model ships: no thinking setting and
+    no effort setting are sent, so it thinks when it judges it should, at its
+    default effort. Thinking counts against max_tokens, hence the headroom.
+
+    v0.22.0 sent thinking disabled, to match the other voices. Over a full
+    meanings prefix a current Haiku model then answers with the list's first
+    numbers in order, or with prose. The vendor's own guidance is to steer
+    this model by effort and not by disabling thinking.
+
+    No temperature is sent. The model refuses any non-default sampling
+    value, so this voice cannot be pinned to 0 and samples at its default."""
+    return {
+        "model": voice.model,
+        "max_tokens": max_tokens + _THINKING_HEADROOM,
+    }
+
+
 def compress_request(voice: Voice, prompt: str) -> tuple[str, dict[str, str], dict[str, Any]]:
     """(url, headers, body) for one compression call. Pure."""
+    if voice.provider == "anthropic":
+        body = _anthropic_base(voice, _COMPRESS_MAX_TOKENS)
+        body["messages"] = [{"role": "user", "content": prompt}]
+        return (f"{voice.base}/messages", _anthropic_headers(voice), body)
     if voice.provider == "openai":
         body = _openai_base(voice, _COMPRESS_MAX_TOKENS)
         body["input"] = prompt
@@ -637,6 +704,50 @@ def compress_request(voice: Voice, prompt: str) -> tuple[str, dict[str, str], di
     )
 
 
+# Whether a voice is asked for its answer under a JSON schema: a list of
+# exactly as many node numbers as were requested, and nothing else. This
+# fixes the answer's FORM. It does not fix the answer: the same call still
+# returns different selections from one run to the next.
+# Gemini: a guard. Under the old header a current Flash model wrote a reason
+# after each number on most calls; with the header fixed it rarely does, and
+# the schema is what makes "rarely" into "cannot".
+# OpenAI: its voice already answers in bare numbers, so a schema only adds
+# the JSON around them. It does not stop the voice repeating a number.
+STRUCTURED = {"gemini": True, "openai": False, "anthropic": False}
+# OpenAI's strict schemas need an object at the root, so its list sits
+# under this key. The parser reads either form.
+SELECTIONS_KEY = "selections"
+
+
+def selection_schema(items: int) -> dict[str, Any]:
+    """A JSON list of exactly `items` integers."""
+    return {"type": "array", "items": {"type": "integer"},
+            "minItems": items, "maxItems": items}
+
+
+def _structure(voice: Voice, body: dict[str, Any], items: int) -> None:
+    """Ask for the answer under selection_schema, in the provider's form."""
+    if voice.provider == "gemini":
+        # The enum spelling: generateContent answers 400 to the
+        # "application/json" that Google's own REST example shows.
+        body["generationConfig"]["responseFormat"] = {
+            "text": {"mimeType": "APPLICATION_JSON",
+                     "schema": selection_schema(items)},
+        }
+    elif voice.provider == "openai":
+        body["text"]["format"] = {
+            "type": "json_schema", "name": SELECTIONS_KEY, "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {SELECTIONS_KEY: selection_schema(items)},
+                "required": [SELECTIONS_KEY],
+                "additionalProperties": False,
+            },
+        }
+    else:
+        raise ValueError(f"no structured answer is defined for {voice.provider}")
+
+
 # The request shape each voice is deployed with. "split" puts the meanings
 # prefix in its own instruction slot (OpenAI developer message, Gemini
 # systemInstruction) and the trajectory in the user turn; "flat" sends
@@ -644,7 +755,10 @@ def compress_request(voice: Voice, prompt: str) -> tuple[str, dict[str, str], di
 # other shape exists so a comparison can separate the two.
 # Gemini moved from flat to split in v0.18.1: within Gemini, split ranked
 # relevant nodes higher in comparative runs, and its prefix cache held.
-NATIVE_SHAPE = {"gemini": "split", "openai": "split"}
+# The Anthropic voice's split shape is the system prompt; its flat shape is
+# one user turn of two text blocks, because the cache breakpoint has to sit
+# on a block boundary and a single block would never be read from cache.
+NATIVE_SHAPE = {"gemini": "split", "openai": "split", "anthropic": "split"}
 # What production sent before v0.18.1, for reading runs made under it.
 NATIVE_SHAPE_BEFORE_0_18_1 = {"gemini": "flat", "openai": "split"}
 SHAPES = ("flat", "split")
@@ -652,16 +766,39 @@ SHAPES = ("flat", "split")
 
 def match_request(
     voice: Voice, prefix: str, tail: str, shape: str | None = None,
+    structured: int | None = None,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
     """(url, headers, body) for one match call. Pure.
 
     The prefix (header + meanings) is byte-identical between calls and goes
     first either way. By default each voice gets its native shape, both
     now "split": the prefix in the instruction slot, the trajectory in the
-    user turn."""
+    user turn. `structured` is the number of selections to hold the answer
+    to under a schema; None asks for plain lines."""
     shape = shape or NATIVE_SHAPE[voice.provider]
     if shape not in SHAPES:
         raise ValueError(f"unknown request shape {shape!r}")
+    url, headers, body = _match_request(voice, prefix, tail, shape)
+    if structured is not None:
+        _structure(voice, body, structured)
+    return url, headers, body
+
+
+def _match_request(
+    voice: Voice, prefix: str, tail: str, shape: str,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    if voice.provider == "anthropic":
+        body = _anthropic_base(voice, _MATCHER_MAX_OUTPUT)
+        cached = {"type": "text", "text": prefix, "cache_control": _ANTHROPIC_CACHE}
+        if shape == "split":
+            body["system"] = [cached]
+            body["messages"] = [{"role": "user", "content": tail.lstrip()}]
+        else:
+            body["messages"] = [{
+                "role": "user",
+                "content": [cached, {"type": "text", "text": tail}],
+            }]
+        return (f"{voice.base}/messages", _anthropic_headers(voice), body)
     if voice.provider == "openai" and shape == "flat":
         body = _openai_base(voice, _MATCHER_MAX_OUTPUT)
         body["prompt_cache_key"] = _OPENAI_CACHE_KEY
@@ -703,7 +840,16 @@ def match_request(
 
 
 def response_text(voice: Voice, data: dict[str, Any]) -> str:
-    """The generated text out of either provider's response. Pure."""
+    """The generated text out of any provider's response. Pure."""
+    if voice.provider == "anthropic":
+        # A declined request is HTTP 200 with no usable text. Named here so
+        # it is reported as a refusal and not as a malformed answer.
+        if data.get("stop_reason") == "refusal":
+            raise ValueError("the model declined the request (stop_reason refusal)")
+        return "".join(
+            b.get("text", "") for b in data.get("content", [])
+            if b.get("type") == "text"
+        )
     if voice.provider == "openai":
         return "".join(
             c.get("text", "")
@@ -720,6 +866,12 @@ def response_text(voice: Voice, data: dict[str, Any]) -> str:
 def response_generation(voice: Voice, data: dict[str, Any]) -> tuple[int, int]:
     """(output_tokens, reasoning_tokens) — whether a call reasoned is
     measured per call, never assumed from the settings."""
+    if voice.provider == "anthropic":
+        # output_tokens includes thinking; the detail field is the part of
+        # it that was thinking.
+        u = data.get("usage") or {}
+        return (int(u.get("output_tokens") or 0),
+                int((u.get("output_tokens_details") or {}).get("thinking_tokens") or 0))
     if voice.provider == "openai":
         u = data.get("usage") or {}
         return (int(u.get("output_tokens") or 0),
@@ -730,7 +882,13 @@ def response_generation(voice: Voice, data: dict[str, Any]) -> tuple[int, int]:
 
 
 def response_usage(voice: Voice, data: dict[str, Any]) -> tuple[int, int]:
-    """(prompt_tokens, cached_tokens) — the cache evidence, either provider."""
+    """(prompt_tokens, cached_tokens) — the cache evidence, any provider."""
+    if voice.provider == "anthropic":
+        # input_tokens counts only what followed the last cache breakpoint.
+        u = data.get("usage") or {}
+        read = int(u.get("cache_read_input_tokens") or 0)
+        return (int(u.get("input_tokens") or 0)
+                + int(u.get("cache_creation_input_tokens") or 0) + read, read)
     if voice.provider == "openai":
         u = data.get("usage") or {}
         return (int(u.get("input_tokens") or 0),
@@ -787,6 +945,18 @@ async def compress_meaning(
     return meaning
 
 
+def selection_request(top_n: int, include_reasons: bool = False,
+                      structured: bool = False) -> str:
+    """The sentence that closes a match call. It alone says what form the
+    answer takes."""
+    select = f"Select the {top_n} nodes that most bear on the current moment, best first. "
+    if structured:
+        return select + "Answer with the node numbers only, as a JSON list."
+    if include_reasons:
+        return select + "One line each: number - reason. No other text."
+    return select + "Output ONLY the node numbers, one per line. No other text."
+
+
 async def match_meanings(
     prefix: str,
     ordered_names: list[str],
@@ -796,10 +966,15 @@ async def match_meanings(
     timeout_ms: float = 2500,
     include_reasons: bool = False,
     shape: str | None = None,
+    structured: bool | None = None,
 ) -> dict[str, Any]:
     """One match call: cached prefix + trajectory tail -> top_n
     selections. Raises MeaningUnavailable on every failure mode; the
     caller's fallback is the only handler.
+
+    structured defaults to the voice's own setting (STRUCTURED); a
+    comparison passes it to measure one voice both ways. Reasons are prose,
+    so a call that asks for them is never structured.
 
     include_reasons defaults OFF, and the default is measured, not
     stylistic: at top_n=30 the reasons cost 554-762 output tokens and
@@ -810,20 +985,14 @@ async def match_meanings(
     if not voice.configured:
         raise MeaningUnavailable(f"matcher: {_not_configured(voice)}")
 
-    if include_reasons:
-        request = (
-            f"Select the {top_n} nodes that most bear on the current "
-            "moment, best first. One line each: number - reason. No other "
-            "text."
-        )
-    else:
-        request = (
-            f"Select the {top_n} nodes that most bear on the current "
-            "moment, best first. Output ONLY the node numbers, one per "
-            "line. No other text."
-        )
+    if structured is None:
+        structured = STRUCTURED[voice.provider]
+    structured = structured and not include_reasons
+    request = selection_request(top_n, include_reasons, structured)
     tail = f"\n{trajectory_text}\n\n{request}"
-    url, headers, body = match_request(voice, prefix, tail, shape)
+    # Never more than the collection holds: the schema demands an exact count.
+    items = min(top_n, len(ordered_names)) if structured else None
+    url, headers, body = match_request(voice, prefix, tail, shape, items)
     t0 = time.perf_counter()
     try:
         data = await _post(url, headers, body, timeout_ms / 1000.0)
@@ -842,6 +1011,9 @@ async def match_meanings(
         )
     return {
         "selections": selections,
+        # Reported, not refused, here: a comparison has to count this as the
+        # voice's answer. The live chain is where it is refused.
+        "ordinal": ordinal_answer(selections, ordered_names),
         "raw": raw,
         "ms": ms,
         "prompt_tokens": prompt_tokens,
@@ -849,6 +1021,18 @@ async def match_meanings(
         "output_tokens": output_tokens,
         "reasoning_tokens": reasoning_tokens,
     }
+
+
+def ordinal_answer(selections: list[dict[str, Any]], ordered_names: list[str]) -> bool:
+    """True when a voice answered with the head of the list in order: lines
+    1, 2, 3 ... as its whole selection. That is a model declining the task
+    in the shape of an answer. It parses perfectly, so nothing else catches
+    it. Five or more, so a short honest selection that happens to start at
+    line 1 is not refused."""
+    if len(selections) < 5:
+        return False
+    head = ordered_names[:len(selections)]
+    return [s["name"] for s in selections] == head
 
 
 # A fallback attempt gets the budget the earlier ones left. Below this it is
@@ -948,6 +1132,11 @@ async def match_chain(
                 voice, index, _ = running.pop(task)
                 try:
                     matched = task.result()
+                    if matched.get("ordinal"):
+                        raise MeaningUnavailable(
+                            "answered with the head of the list in order, "
+                            "not a selection"
+                        )
                 except MeaningUnavailable as e:
                     health.failed(voice.id)
                     attempts.append({"voice": voice.id, "error": str(e)})

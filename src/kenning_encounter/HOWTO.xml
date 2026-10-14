@@ -214,7 +214,9 @@
 <encounter-cycle>
   <step order="1" action="open-and-orient">
     Open with advance_encounter, passing session_id (your harness session id;
-    the SessionStart hook hands it to you) and no predecessor: the server finds
+    the SessionStart hook hands it to you; if it also prints a line beginning
+    HOOKS STALE, HOOKS ALTERED or HOOKS CHECK UNREADABLE, tell the user that
+    first) and no predecessor: the server finds
     your session's latest encounter in the graph and links from it. A session's
     first encounter starts that session's path, and NEXT_LOCUS places the
     session among the others. It hands you the RE-ENTRY PAYLOAD: your

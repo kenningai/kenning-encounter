@@ -43,3 +43,7 @@ EXPERIENCE_HOWTO.xml
 # Measurement dumps, vendor exports and scratch that has no business in a
 # release surface — and may carry credentials pulled from a live system.
 docs/research/
+
+# Run inputs kept as nodes.json.gz beside them: the raw file is over jj's 2 MiB
+# new-file limit, and the runner reads the uncompressed copy.
+lab/runs/t0-voices/*/nodes.json

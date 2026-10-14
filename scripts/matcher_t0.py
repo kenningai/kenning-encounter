@@ -19,8 +19,10 @@ Held equal between arms, or measured where it cannot be held:
   - the node set and the ORDER of the meanings list: one shared order, the
     intersection of every voice's sidecar (each voice keeps its own
     meanings; only the line each node sits on is shared);
-  - the corpus, trajectory assembly, k, timeout, temperature and the
-    request text;
+  - the corpus, trajectory assembly, k, timeout and the request text;
+  - temperature, where a provider lets it be set, which is OpenAI only: the
+    Anthropic and Gemini voices sample at their defaults, so their variation
+    between repeats is measured and not held;
   - time: every call is scheduled in one seeded random order, interleaving
     the arms, so provider load cannot line up with an arm;
   - the graph: the scored set runs against sidecar SNAPSHOTS taken when the
@@ -78,7 +80,120 @@ ARMS: dict[str, tuple[str, str]] = {
     "gemini-split": ("gemini", "split"),
     "openai-split": ("openai", "split"),
     "openai-flat": ("openai", "flat"),
+    "anthropic-split": ("anthropic", "split"),
+    "anthropic-flat": ("anthropic", "flat"),
 }
+# The setting that names each voice's model, as the server reads it.
+MODEL_ENV = {
+    "gemini": "NEO4J_MATCHER_MODEL",
+    "openai": "NEO4J_MATCHER_OPENAI_MODEL",
+    "anthropic": "NEO4J_MATCHER_ANTHROPIC_MODEL",
+}
+# CROSSED arms: one voice matching over the meanings ANOTHER voice wrote.
+# arm -> (matcher, shape, author of the meanings). They exist only here.
+# The server refuses a sidecar its voice did not write, on the premise that a
+# model reads its own sentences better than another's; these arms are how
+# that premise is measured. Split shape only, to bound the number of tests.
+# Never run by default: name them in --arms.
+CROSSED: dict[str, tuple[str, str, str]] = {
+    f"{m}-reads-{a}": (m, "split", a)
+    for m in MODEL_ENV for a in MODEL_ENV if m != a
+}
+
+
+# RAW arms: a voice matching over the graph author's OWN words, where a
+# sidecar meaning would be: the first RAW_WORDS words of each node's
+# description. The same length as a meaning, so the arm differs from the
+# voice's own in who wrote the line and not in how long it is. It is a cut,
+# not a compression, and the reading has to say so. Needs --nodes.
+RAW_WORDS = 30
+RAW: dict[str, tuple[str, str, str]] = {
+    f"{m}-reads-raw": (m, "split", "raw") for m in MODEL_ENV
+}
+# These arms answer a question about the meanings, which the prompt-alone
+# mode does not bear on, so they run with the arc only.
+ARC_ONLY = {**CROSSED, **RAW}
+
+
+def raw_meanings(nodes: dict[str, str], order: list[str]) -> dict[str, dict[str, str]]:
+    """A sidecar-shaped mapping whose meanings are the author's own opening
+    words. Every name in `order` must be in the dump."""
+    missing = [n for n in order if n not in nodes]
+    if missing:
+        raise SystemExit(f"--nodes lacks {len(missing)} of the {len(order)} nodes in the shared order")
+    return {n: {"meaning": " ".join(nodes[n].split()[:RAW_WORDS])} for n in order}
+
+
+def arm_spec(arm: str) -> tuple[str, str, str]:
+    """(matcher, shape, author of the meanings) for any arm."""
+    if arm in ARC_ONLY:
+        return ARC_ONLY[arm]
+    provider, shape = ARMS[arm]
+    return provider, shape, provider
+
+
+def interaction(scores: dict[str, dict], x: str, y: str, metric: str) -> dict[str, Any] | None:
+    """Own-meanings advantage for a pair of voices, per case:
+    (x on x's + y on y's) − (x on y's + y on x's), halved.
+
+    Positive means each voice did better on the sentences it wrote itself.
+    A voice that simply matches better, or a sidecar that is simply easier
+    to match against, adds to both sides and cancels. None when any of the
+    four arms was not run."""
+    arms = (f"{x}-split", f"{y}-split", f"{x}-reads-{y}", f"{y}-reads-{x}")
+    if any(a not in scores for a in arms):
+        return None
+    xx, yy, xy, yx = (scores[a] for a in arms)
+    ids = sorted(set(xx) & set(yy) & set(xy) & set(yx))
+    diffs = [(xx[c][metric] + yy[c][metric] - xy[c][metric] - yx[c][metric]) / 2 for c in ids]
+    total = (statistics.mean(diffs) if diffs else 0.0) if metric == "mrr" else sum(diffs)
+    p = sign_flip_p(diffs, seed=len(ids))
+    return {"n": len(ids), "diff": total, "p": p,
+            "claim": abs(total) > TIE_BAND[metric] and p < ALPHA}
+
+
+def agreement(runs: dict, a: str, b: str, case_ids: list[str], reps: int) -> float | None:
+    """Mean Jaccard overlap of what two arms kept (top PRODUCTION_K) on the
+    same case with the arc. With a == b it is the arm against itself across
+    repeats, which is the level any between-arm figure has to be read
+    against. None when no pair of runs carries its selections."""
+    vals = []
+    for cid in case_ids:
+        for i in range(reps):
+            for j in range(reps):
+                if a == b and j <= i:
+                    continue
+                x = runs.get(task_key(a, cid, "arc", i), {}).get("top")
+                y = runs.get(task_key(b, cid, "arc", j), {}).get("top")
+                if x is None or y is None:
+                    continue
+                union = set(x) | set(y)
+                vals.append(len(set(x) & set(y)) / len(union) if union else 1.0)
+    return statistics.mean(vals) if vals else None
+
+
+def raw_cost_gap(scores: dict[str, dict], x: str, y: str, metric: str) -> dict[str, Any] | None:
+    """What reading the author's own words costs x, minus what it costs y:
+    (x on its own − x on raw) − (y on its own − y on raw), per case.
+
+    Negative means x loses less than y when its own meanings are replaced
+    by the author's wording, which is what a voice at home in that wording
+    would show. None when any of the four arms was not run."""
+    arms = (f"{x}-split", f"{x}-reads-raw", f"{y}-split", f"{y}-reads-raw")
+    if any(a not in scores for a in arms):
+        return None
+    xo, xr, yo, yr = (scores[a] for a in arms)
+    ids = sorted(set(xo) & set(xr) & set(yo) & set(yr))
+    diffs = [(xo[c][metric] - xr[c][metric]) - (yo[c][metric] - yr[c][metric]) for c in ids]
+    total = (statistics.mean(diffs) if diffs else 0.0) if metric == "mrr" else sum(diffs)
+    p = sign_flip_p(diffs, seed=len(ids))
+    return {"n": len(ids), "diff": total, "p": p,
+            "claim": abs(total) > TIE_BAND[metric] and p < ALPHA}
+
+
+# Every pair of voices a run can compare, in a fixed order.
+VOICE_PAIRS = (("gemini", "openai"), ("gemini", "anthropic"), ("openai", "anthropic"))
+LABEL = {"gemini": "Gemini", "openai": "OpenAI", "anthropic": "Anthropic"}
 K = 30
 PRODUCTION_K = 12          # what infusion keeps
 # The reading rule, fixed before any held-out call.
@@ -181,8 +296,20 @@ def leaks(case: dict) -> list[str]:
 
 
 def transient(error: str) -> bool:
-    """A provider-side failure worth retrying: rate limit, 5xx, timeout."""
-    return bool(re.search(r"\b(429|5\d\d)\b|Timeout", error))
+    """A provider-side failure worth retrying: rate limit, 5xx, timeout.
+    The status is read where httpx writes it, quoted after 'error'. Read
+    anywhere in the text it also matched a malformed answer's length, so
+    'malformed matcher output (512 chars ...)' was retried as if it were
+    a 512."""
+    return bool(re.search(r"error '(429|5\d\d) |Timeout", error))
+
+
+def account_failure(error: str) -> bool:
+    """The provider's account state, not an answer: a rejected key, an
+    unpaid bill, a forbidden project. Retrying will not clear it and it must
+    never stand as the arm's result, so the arm pauses and its calls stay
+    unrecorded for the next invocation."""
+    return bool(re.search(r"error '(401|402|403) ", error))
 
 
 def summarize(ranks: list[int | None], k: int) -> float:
@@ -202,7 +329,8 @@ def shared_order(sidecars: dict[str, dict[str, Any]], order_from: str) -> tuple[
 
 def schedule(case_ids: list[str], arms: list[str], repeats: int, seed: int) -> list[tuple[str, str, str, int]]:
     """Every (arm, case, mode, repeat) call, in one seeded random order."""
-    tasks = [(a, c, m, r) for a in arms for c in case_ids for m in MODES for r in range(repeats)]
+    tasks = [(a, c, m, r) for a in arms for c in case_ids for m in MODES for r in range(repeats)
+             if m == "arc" or a not in ARC_ONLY]
     random.Random(seed).shuffle(tasks)
     return tasks
 
@@ -301,14 +429,15 @@ async def _call(prefix, names, text, voice, shape, timeout_ms):
         except MeaningUnavailable as e:
             if not transient(str(e)) or attempt == 3:
                 raise
-            await asyncio.sleep(20 * (attempt + 1) if "429" in str(e) else 5 * (attempt + 1))
+            await asyncio.sleep(20 * (attempt + 1) if "'429 " in str(e) else 5 * (attempt + 1))
     raise AssertionError("unreachable")
 
 
 async def run_tasks(state: dict, tasks, arms_cfg, cases_by_id, timeout_ms: int, save) -> dict[str, str]:
     """Run every task not already in state['runs']. A rate limit that
-    survives the retries pauses that arm for this invocation; its calls stay
-    unrecorded and the next invocation resumes them."""
+    survives the retries, or an account failure (auth, billing), pauses that
+    arm for this invocation; its calls stay unrecorded and the next
+    invocation resumes them."""
     from kenning_encounter.meaning import MeaningUnavailable, assemble_trajectory
 
     paused: dict[str, str] = {}
@@ -330,16 +459,23 @@ async def run_tasks(state: dict, tasks, arms_cfg, cases_by_id, timeout_ms: int, 
         try:
             m = await _call(prefix, names, text, voice, shape, timeout_ms)
         except MeaningUnavailable as e:
-            if "429" in str(e):
+            if "'429 " in str(e) or account_failure(str(e)):
                 paused[arm] = str(e)[:160]
                 continue
             state["runs"][key] = {"error": str(e)[:200]}
             save()
             continue
         sel = [s["name"] for s in m["selections"]]
+        # The head of the list in order is not a selection. It is scored as
+        # a miss even when the target happens to sit in those first lines.
+        found = [] if m.get("ordinal") else sel
         state["runs"][key] = {
-            "rank": sel.index(c["target"]) + 1 if c["target"] in sel else None,
-            "decoy_rank": sel.index(c["decoy"]) + 1 if c.get("decoy") and c["decoy"] in sel else None,
+            # Positions in the shared order, never names: what was kept,
+            # so agreement between arms can be read without node text.
+            "top": [names.index(n) for n in sel[:PRODUCTION_K]],
+            "ordinal": bool(m.get("ordinal")),
+            "rank": found.index(c["target"]) + 1 if c["target"] in found else None,
+            "decoy_rank": found.index(c["decoy"]) + 1 if c.get("decoy") and c["decoy"] in found else None,
             "ms": m["ms"], "prompt_tokens": m["prompt_tokens"], "cached_tokens": m["cached_tokens"],
             "output_tokens": m["output_tokens"], "reasoning_tokens": m["reasoning_tokens"],
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -383,8 +519,11 @@ def render(state: dict, cases: list[dict], arms: list[str], incomplete: int, pau
 
     scores: dict[str, dict[str, dict]] = {}
     for arm in arms:
-        provider, shape = ARMS[arm]
-        L += [f"## {arm} — {meta['models'][provider]}, {shape} request", "",
+        provider, shape, author = arm_spec(arm)
+        reads = ("" if author == provider
+                 else f", reading the graph author's first {meta.get('raw_words', RAW_WORDS)} words"
+                 if author == "raw" else f", reading {meta['models'][author]}'s meanings")
+        L += [f"## {arm} — {meta['models'][provider]}, {shape} request{reads}", "",
               "| case | stratum | arc ranks | prompt-alone ranks | decoy ranks (arc) |",
               "|---|---|---|---|---|"]
         per_case: dict[str, dict] = {}
@@ -423,11 +562,15 @@ def render(state: dict, cases: list[dict], arms: list[str], incomplete: int, pau
                   f"- **recall@{K}: {r30:.2f}/{n}** · **recall@{PRODUCTION_K}: {r12:.2f}/{n}** · "
                   f"**MRR: {mrr:.3f}** — fitness floor {FITNESS_FLOOR:.0%} at k={K}: "
                   f"{'met' if r30 / n >= FITNESS_FLOOR else 'NOT met'}",
-                  f"- prompt alone recall@{K}: {alone30:.2f}/{len(alone_case)}; trajectory delta {r30 - alone30:+.2f}",
+                  ("- prompt alone: not run for this arm" if arm in ARC_ONLY else
+                   f"- prompt alone recall@{K}: {alone30:.2f}/{len(alone_case)}; trajectory delta {r30 - alone30:+.2f}"),
                   f"- cases whose arc rank changed between repeats: {unstable}/{n}",
                   f"- arc runs where the decoy outranked the target: {decoy_over}",
                   f"- calls errored after retries: {len(all_runs) - len(ok)} (shown as ERR; neither hit nor miss)",
+                  f"- answers that were the head of the list in order (scored as misses): "
+                  f"{sum(1 for r in ok if r.get('ordinal'))} of {len(ok)}",
                   f"- reasoning tokens per call: mean {statistics.mean(r['reasoning_tokens'] for r in ok):.1f}, "
+                  f"calls that reasoned {sum(1 for r in ok if r['reasoning_tokens'])} of {len(ok)}, "
                   f"max {max(r['reasoning_tokens'] for r in ok)} · output tokens mean "
                   f"{statistics.mean(r['output_tokens'] for r in ok):.1f}",
                   f"- latency p50 {statistics.median(r['ms'] for r in ok):.0f} ms · cached share p50 "
@@ -441,11 +584,17 @@ def render(state: dict, cases: list[dict], arms: list[str], incomplete: int, pau
     deployed = (f"gemini-{native['gemini']}", f"openai-{native['openai']}")
     pairs = [
         (*deployed, "AS DEPLOYED (each model in its production shape when this run started)"),
-        ("gemini-split", "openai-split", "MODEL, split shape held equal"),
-        ("gemini-flat", "openai-flat", "MODEL, flat shape held equal"),
-        ("gemini-split", "gemini-flat", "SHAPE, within Gemini"),
-        ("openai-split", "openai-flat", "SHAPE, within OpenAI"),
     ]
+    for x, y in VOICE_PAIRS:
+        pairs += [
+            (f"{x}-split", f"{y}-split", f"MODEL {LABEL[x]} vs {LABEL[y]}, split shape held equal"),
+            (f"{x}-flat", f"{y}-flat", f"MODEL {LABEL[x]} vs {LABEL[y]}, flat shape held equal"),
+        ]
+    pairs += [(f"{x}-split", f"{x}-flat", f"SHAPE, within {LABEL[x]}") for x in LABEL]
+    pairs += [(f"{m}-split", arm, f"MEANINGS, {LABEL[m]} matching: its own against {LABEL[a]}'s")
+              for arm, (m, _, a) in CROSSED.items()]
+    pairs += [(f"{m}-split", arm, f"MEANINGS, {LABEL[m]} matching: its own against the graph author's opening words")
+              for arm, (m, _, _) in RAW.items()]
     L += ["## Contrasts", "",
           f"Paired over cases. A difference is CLAIMED only when it is outside the tie band "
           f"(recall ±{TIE_BAND['recall@30']:.0f} cases, MRR ±{TIE_BAND['mrr']:.2f}) AND the sign-flip "
@@ -466,15 +615,71 @@ def render(state: dict, cases: list[dict], arms: list[str], incomplete: int, pau
             n = r["n"]
         L.append(f"| {a} − {b} | {what} | {n} | " + " | ".join(cells) + " |")
     L.append("")
-    for metric in ("recall@30", "recall@12", "mrr"):
-        s = claims.get(("gemini-split|openai-split", metric))
-        f = claims.get(("gemini-flat|openai-flat", metric))
-        if s and f:
-            same_dir = (s["diff"] > 0) == (f["diff"] > 0)
-            verdict = ("a MODEL difference is claimed" if s["claim"] and f["claim"] and same_dir
-                       else "no model difference is claimed")
-            L.append(f"- {metric}: {verdict} (split {'claimed' if s['claim'] else 'not claimed'}, "
-                     f"flat {'claimed' if f['claim'] else 'not claimed'}).")
+    for x, y in VOICE_PAIRS:
+        for metric in ("recall@30", "recall@12", "mrr"):
+            s = claims.get((f"{x}-split|{y}-split", metric))
+            f = claims.get((f"{x}-flat|{y}-flat", metric))
+            if s and f:
+                same_dir = (s["diff"] > 0) == (f["diff"] > 0)
+                verdict = ("a MODEL difference is claimed" if s["claim"] and f["claim"] and same_dir
+                           else "no model difference is claimed")
+                L.append(f"- {LABEL[x]} vs {LABEL[y]}, {metric}: {verdict} "
+                         f"(split {'claimed' if s['claim'] else 'not claimed'}, "
+                         f"flat {'claimed' if f['claim'] else 'not claimed'}).")
+    own = []
+    for x, y in VOICE_PAIRS:
+        cells = []
+        for metric in ("recall@30", "recall@12", "mrr"):
+            r = interaction(scores, x, y, metric)
+            if r is None:
+                break
+            claims[(f"own-meanings {x}|{y}", metric)] = r
+            fmtd = f"{r['diff']:+.3f}" if metric == "mrr" else f"{r['diff']:+.2f}"
+            cells.append(f"{metric} {fmtd} (p={r['p']:.3f})" + (" **claimed**" if r["claim"] else ""))
+        if cells:
+            own.append(f"- {LABEL[x]} and {LABEL[y]}: " + "; ".join(cells) + ".")
+    if own:
+        L += ["", "Own-meanings advantage: each voice on the meanings it wrote, minus each on the "
+                  "other's, halved, per case. Positive means a voice reads its own sentences better. "
+                  "A better matcher or an easier sidecar cancels out of it.", *own]
+    ids = [c["id"] for c in cases]
+    native = [f"{x}-split" for x in LABEL if f"{x}-split" in scores]
+    agree = [(a, b, agreement(runs, a, b, ids, reps))
+             for i, a in enumerate(native) for b in native[i:]]
+    agree = [(a, b, v) for a, b, v in agree if v is not None]
+    if agree:
+        L += ["", f"Agreement: mean overlap (Jaccard) of the {PRODUCTION_K} nodes two arms kept on the same "
+                  "case. An arm against itself is its overlap across repeats, and is the ceiling a "
+                  "between-voice figure is read against. Mechanics only: it says whether voices keep "
+                  "the same company, not whose is better.",
+              *[f"- {a} with {'itself across repeats' if a == b else b}: {v:.2f}" for a, b, v in agree]]
+    gaps = []
+    for x, y in VOICE_PAIRS:
+        cells = []
+        for metric in ("recall@30", "recall@12", "mrr"):
+            r = raw_cost_gap(scores, x, y, metric)
+            if r is None:
+                break
+            claims[(f"raw-cost {x}|{y}", metric)] = r
+            fmtd = f"{r['diff']:+.3f}" if metric == "mrr" else f"{r['diff']:+.2f}"
+            cells.append(f"{metric} {fmtd} (p={r['p']:.3f})" + (" **claimed**" if r["claim"] else ""))
+        if cells:
+            gaps.append(f"- {LABEL[x]} minus {LABEL[y]}: " + "; ".join(cells) + ".")
+    if gaps:
+        L += ["", "Cost of the author's own words: what each voice loses when its meanings are replaced "
+                  f"by the first {meta.get('raw_words', RAW_WORDS)} words of each description, compared between "
+                  "voices. Negative means the first-named voice loses less.", *gaps]
+    # Every test in the table, corrected together. The claim rule above is
+    # the registered one; this line is printed beside it so the number of
+    # tests is never left for a reader to count.
+    tests = len(claims)
+    if tests:
+        bar = ALPHA / tests
+        kept = [f"{k[0].replace('|', ' − ')} {k[1]}" for k, r in claims.items()
+                if r["claim"] and r["p"] < bar]
+        L += ["", f"Multiplicity: {tests} tests in this table. Claims that also pass "
+                  f"p < {ALPHA}/{tests} = {bar:.5f} (Bonferroni): "
+                  + ("; ".join(kept) if kept else "none") + "."]
     L += ["", "Which voice leads is not decided by this table alone.", ""]
     return "\n".join(L)
 
@@ -484,11 +689,12 @@ def main() -> int:
     ap.add_argument("corpus", help="the frozen corpus JSON")
     ap.add_argument("--set", default="heldout", choices=SETS,
                     help="dev checks the apparatus; heldout is scored ONCE")
-    ap.add_argument("--arms", nargs="*", default=list(ARMS), choices=list(ARMS))
+    ap.add_argument("--arms", nargs="*", default=list(ARMS), choices=[*ARMS, *ARC_ONLY])
+    ap.add_argument("--nodes", help='JSON list of {"name", "description"}; required by a -reads-raw arm')
     ap.add_argument("--repeats", type=int, default=5,
                     help="runs per case per mode (A2: 5, from the measured spread of identical calls)")
     ap.add_argument("--seed", type=int, default=20261002, help="schedule seed (recorded)")
-    ap.add_argument("--order-from", default="gemini", choices=["gemini", "openai"],
+    ap.add_argument("--order-from", default="gemini", choices=list(MODEL_ENV),
                     help="whose sidecar insertion order is the shared order")
     ap.add_argument("--timeout-ms", type=int, default=15_000,
                     help="per call; generous, because a gate measures the arm, not the hook budget")
@@ -530,14 +736,21 @@ def main() -> int:
     )
 
     _env_from_dotenv()
-    providers = sorted({ARMS[arm][0] for arm in a.arms} | {a.order_from})
+    providers = sorted({p for arm in a.arms for p in (arm_spec(arm)[0], arm_spec(arm)[2])}
+                       - {"raw"} | {a.order_from})
+    wants_raw = any(arm in RAW for arm in a.arms)
+    if wants_raw and not a.nodes:
+        raise SystemExit("a -reads-raw arm needs --nodes")
     voices = {}
     for p in providers:
         key = os.environ.get(KEY_ENV[p], "")
         if not key:
             raise SystemExit(f"{KEY_ENV[p]} not set: an arm with a missing key is not run")
-        model = os.environ.get("NEO4J_MATCHER_MODEL" if p == "gemini" else "NEO4J_MATCHER_OPENAI_MODEL") or DEFAULT_MODELS[p]
-        voices[p] = Voice(p, model, key)
+        model = os.environ.get(MODEL_ENV[p]) or DEFAULT_MODELS[p]
+        # The Gemini voice runs at the thinking level the server runs it at;
+        # a thinking-only model given none would reason at its default.
+        thinking = os.environ.get("NEO4J_MATCHER_THINKING", "").strip().lower() if p == "gemini" else ""
+        voices[p] = Voice(p, model, key, thinking=thinking)
 
     # Held-out state persists (resume; scored once). Dev never persists.
     persist = a.set == "heldout" and not a.check_only
@@ -582,6 +795,15 @@ def main() -> int:
             if c.get(role) and c[role] not in in_order:
                 excluded.setdefault(c["id"], f"{role} not in every voice's sidecar")
     scored = [c for c in cases if c["id"] not in excluded]
+    nodes_sha = ""
+    if wants_raw:
+        blob = Path(a.nodes).read_bytes()
+        nodes_sha = hashlib.sha256(blob).hexdigest()
+        sidecars["raw"] = raw_meanings(
+            {n["name"]: n.get("description") or "" for n in json.loads(blob)}, order)
+    if state is not None and state["meta"].get("nodes_sha256", "") != nodes_sha:
+        print("REFUSED — the node dump no longer matches the run being resumed")
+        return 2
 
     if a.check_only:
         print(f"CHECK PASSED — corpus sha256 {digest[:16]}; set {a.set}: {len(cases)} cases, "
@@ -600,6 +822,8 @@ def main() -> int:
             "sidecar_sha256": shas, "sidecar_sizes": {p: len(n) for p, n in sidecars.items()},
             "dropped": dropped, "excluded": excluded,
             "models": {p: v.model for p, v in voices.items()},
+            "thinking": {p: v.thinking for p, v in voices.items()},
+            "nodes_sha256": nodes_sha, "raw_words": RAW_WORDS,
             "native_shapes": dict(NATIVE_SHAPE),
             "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }, "repeats": a.repeats, "runs": {}}
@@ -615,8 +839,8 @@ def main() -> int:
 
     arms_cfg = {}
     for arm in a.arms:
-        p, shape = ARMS[arm]
-        prefix, names = build_prefix({n: sidecars[p][n] for n in order})
+        p, shape, author = arm_spec(arm)
+        prefix, names = build_prefix({n: sidecars[author][n] for n in order})
         arms_cfg[arm] = (voices[p], shape, prefix, names)
     tasks = schedule([c["id"] for c in scored], a.arms, a.repeats, a.seed)
     pending = sum(1 for t in tasks if task_key(*t) not in state["runs"])

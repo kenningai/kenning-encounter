@@ -98,12 +98,24 @@ def main():
 
     parser.add_argument(
         "--matcher-lead", default=None,
-        choices=["gemini", "openai", "alternate"],
+        choices=["gemini", "openai", "anthropic", "alternate"],
         help=(
             "Which matcher voice leads (default: gemini). 'alternate' picks "
             "the lead per locus from the session id. The other configured "
-            "voice is the fallback"
+            "voices are the fallbacks, in the order gemini, openai, anthropic"
         ),
+    )
+    parser.add_argument(
+        "--matcher-anthropic-model", default=None,
+        help=(
+            "Anthropic matcher voice model (default: claude-haiku-5-5). The "
+            "key comes from ANTHROPIC_API_KEY, env only; no key -> no "
+            "Anthropic voice"
+        ),
+    )
+    parser.add_argument(
+        "--matcher-anthropic-endpoint", default=None,
+        help="Anthropic API base URL (default: https://api.anthropic.com/v1)",
     )
     parser.add_argument(
         "--matcher-openai-model", default=None,

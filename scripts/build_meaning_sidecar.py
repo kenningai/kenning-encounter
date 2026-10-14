@@ -7,7 +7,7 @@ through one VOICE — the same model that will match against it, which is
 load-bearing: single-voice authorship is what kills the two-idiolect
 problem — and writes that voice's stamped sidecar beside --out
 (models/meaning_sidecar.<provider>-<model>.json). Gemini by default;
---provider openai builds the OpenAI voice's.
+--provider openai or --provider anthropic builds that voice's.
 
 Idempotent by content hash: unchanged nodes keep their meaning, new or
 edited nodes recompute, departed nodes drop. Nothing is ever written to

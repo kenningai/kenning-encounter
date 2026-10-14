@@ -1400,9 +1400,9 @@ def create_mcp_server(
         voice: str | None = Field(
             default=None,
             description=(
-                "Run ONE matcher voice by provider ('gemini' or 'openai'), "
-                "against that voice's own sidecar, with no fallback — how "
-                "two voices are compared on the same cases. Default: the "
+                "Run ONE matcher voice by provider ('gemini', 'openai' or "
+                "'anthropic'), against that voice's own sidecar, with no "
+                "fallback — how voices are compared on the same cases. Default: the "
                 "configured lead, with the fallback chain."
             ),
         ),
@@ -1637,6 +1637,9 @@ async def main(
     matcher_openai_api_key: str = "",
     matcher_openai_model: str = "gpt-6-luna",
     matcher_openai_endpoint: str = "https://api.openai.com/v1",
+    matcher_anthropic_api_key: str = "",
+    matcher_anthropic_model: str = "claude-haiku-5-5",
+    matcher_anthropic_endpoint: str = "https://api.anthropic.com/v1",
     matcher_lead: str = "gemini",
     matcher_cooldown_s: int = 300,
     matcher_hedge_ms: int = 3700,
@@ -1683,14 +1686,20 @@ async def main(
     # human's chore. Writes only the sidecar file; the graph is read-only
     # to this entire path.
     # The Gemini voice is always present (keyless it reports itself
-    # unconfigured, as before v0.17.0); the OpenAI voice exists only with a
-    # key, so a deployment that never set one sees nothing new.
+    # unconfigured, as before v0.17.0); the OpenAI and Anthropic voices
+    # exist only with a key, so a deployment that never set one sees
+    # nothing new.
     voices = [Voice("gemini", matcher_model, matcher_api_key, matcher_endpoint,
                     thinking=matcher_thinking)]
     if matcher_openai_api_key:
         voices.append(Voice(
             "openai", matcher_openai_model, matcher_openai_api_key,
             matcher_openai_endpoint,
+        ))
+    if matcher_anthropic_api_key:
+        voices.append(Voice(
+            "anthropic", matcher_anthropic_model, matcher_anthropic_api_key,
+            matcher_anthropic_endpoint,
         ))
     logger.warning(
         "meaning matcher voices: %s; lead %s; shadow %s",

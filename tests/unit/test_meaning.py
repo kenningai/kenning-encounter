@@ -24,6 +24,7 @@ from kenning_encounter.meaning import (
     format_meaning_report,
     match_meanings,
     parse_matcher_output,
+    selection_request,
     record_deferral,
     sidecar_diff,
     user_turns_from_transcript,
@@ -44,6 +45,14 @@ class TestBuildPrefix:
         assert prefix.startswith(MATCHER_HEADER)
         assert "1. Zeta concept :: About z." in prefix
         assert "3. Mid note :: About m." in prefix
+
+    def test_the_header_leaves_the_answers_form_to_the_request(self):
+        # It once asked for a reason per line while the request asked for
+        # numbers only.
+        assert "reason" not in MATCHER_HEADER and "one line" not in MATCHER_HEADER
+        assert "reason" not in selection_request(12)
+        assert "reason" in selection_request(12, include_reasons=True)
+        assert "JSON" in selection_request(12, structured=True)
 
     def test_deterministic_bytes(self):
         assert build_prefix(NODES) == build_prefix(dict(NODES.items()))
@@ -126,6 +135,33 @@ class TestParseMatcherOutput:
     def test_empty_is_malformed_signal(self):
         assert parse_matcher_output("", self.ORDERED, 10) == []
         assert parse_matcher_output("no numbers here", self.ORDERED, 10) == []
+
+    def test_a_json_list_is_read_in_order(self):
+        # A structured answer, compact or pretty-printed.
+        for raw in ("[3, 1]", "[\n  3,\n  1\n]"):
+            out = parse_matcher_output(raw, self.ORDERED, 10)
+            assert [s["name"] for s in out] == ["Zeta concept", "Alpha observation"]
+            assert all(s["reason"] == "" for s in out)
+
+    def test_a_json_object_is_read_under_the_selections_key(self):
+        out = parse_matcher_output('{"selections": [2, 3]}', self.ORDERED, 10)
+        assert [s["name"] for s in out] == ["Mid note", "Zeta concept"]
+
+    def test_json_answers_keep_the_same_guards(self):
+        # Out of range dropped, duplicates dropped, capped; a non-integer is
+        # never read as a line number.
+        out = parse_matcher_output("[7, 2, 2, true, 1.0, 3, 1]", self.ORDERED, 2)
+        assert [s["name"] for s in out] == ["Mid note", "Zeta concept"]
+
+    def test_a_cut_off_json_list_is_read_as_lines(self):
+        # The output cap landing mid-list leaves invalid JSON; what arrived
+        # is still one number per line.
+        out = parse_matcher_output("[\n  3,\n  1,\n  ", self.ORDERED, 10)
+        assert [s["name"] for s in out] == ["Zeta concept", "Alpha observation"]
+
+    def test_json_that_is_not_a_selection_is_malformed(self):
+        assert parse_matcher_output('{"answer": [1, 2]}', self.ORDERED, 10) == []
+        assert parse_matcher_output("[]", self.ORDERED, 10) == []
 
 
 class TestAssembleTrajectory:

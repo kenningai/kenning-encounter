@@ -185,16 +185,19 @@ risk. The sidecar **maintains itself**: nodes are meaning-made on creation,
 a startup reconcile sweep rebuilds any gap from the graph (including first
 boot), and deletions drop entries — there is no maintenance step.
 
-**Two voices.** A *voice* is one model that both writes the sidecar and
+**Voices.** A *voice* is one model that both writes the sidecar and
 matches against it. The design depends on that pairing: a matcher reading
 meanings another model wrote is back to two vocabularies that do not meet.
-Two voices can be configured, Gemini (`GEMINI_API_KEY`) and OpenAI
-(`OPENAI_API_KEY`, `gpt-6-luna` by default), and each keeps its own sidecar,
-stamped with the model that wrote it. A voice refuses a sidecar it did not
-write. `NEO4J_MATCHER_LEAD` chooses which voice leads (`gemini`, `openai`, or
-`alternate`, which picks per session from the session id); the other is the
-fallback, inside the same time budget, and a voice that has just failed is
-tried after the healthy one for a cooldown. With one key you have one voice
+Three voices can be configured: Gemini (`GEMINI_API_KEY`), OpenAI
+(`OPENAI_API_KEY`, `gpt-6-luna` by default) and Anthropic
+(`ANTHROPIC_API_KEY`, `claude-haiku-5-5` by default). Each keeps its own
+sidecar, stamped with the model that wrote it, and a voice refuses a sidecar
+it did not write. `NEO4J_MATCHER_LEAD` chooses which voice leads (`gemini`,
+`openai`, `anthropic`, or `alternate`, which picks per session from the
+session id); the others are the fallbacks, inside the same time budget, and a
+voice that has just failed is tried after the healthy ones for a cooldown.
+Do not use as a voice the same model your agent runs on: the matcher is a
+second reader of what the agent wrote, and a copy of the author is not one. With one key you have one voice
 and nothing else changes.
 
 Which voice should lead is an open question, not a default we can vouch for.
@@ -249,16 +252,35 @@ poorer context simply becomes its whole context, so you are told as well.
 When the matcher found nothing relevant, the hook stays silent: that is a
 healthy answer, not a fault.
 
-### Wiring the hook
+### Installing and wiring the hooks
+
+Run the hooks from an installed copy, not from your clone's working tree. A
+working tree can hold changes you have not released, and a hook runs at the
+start of every session. The installer copies both hooks out of git at a
+tagged release (it refuses an untagged ref) and records what it installed in
+`SOURCE.json`:
+
+```
+python3 scripts/kenning_encounter_install_hooks.py            # from main, into ~/.kenning_encounter/hooks
+python3 scripts/kenning_encounter_install_hooks.py --check    # exit 1 if the copy drifted
+```
 
 ```json
 {
   "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command",
+      "command": "/absolute/path/to/python3 ~/.kenning_encounter/hooks/kenning_encounter_session_start_hook.py" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command",
-      "command": "/absolute/path/to/python3 /path/to/scripts/kenning_encounter_infuse_hook.py" }] }]
+      "command": "/absolute/path/to/python3 ~/.kenning_encounter/hooks/kenning_encounter_infuse_hook.py" }] }]
   }
 }
 ```
+
+The session-start hook hands the trajectory its harness session id. Installed
+this way, it also compares the copy with the same files at your clone's
+`main` each time a session starts, and prints `HOOKS STALE` when a newer
+release has changed a hook. Re-run the installer then. A release that leaves
+the hooks alone raises nothing.
 
 Hook configuration: `KENNING_ENCOUNTER_MCP_URL` (default
 `http://127.0.0.1:8003/mcp/`) or `--url`; `KENNING_ENCOUNTER_INFUSE_TIMEOUT`
@@ -317,7 +339,7 @@ uv run kenning-encounter --db-url bolt://localhost:7687
 
 ```bash
 cp .env.example .env        # set a strong NEO4J_KENNING_ENCOUNTER_PASSWORD
-                            # and GEMINI_API_KEY and/or OPENAI_API_KEY for the matcher
+                            # and GEMINI_API_KEY, OPENAI_API_KEY and/or ANTHROPIC_API_KEY for the matcher
 docker compose up --build   # full face on 127.0.0.1:8003, reader face on 127.0.0.1:8005
 ```
 
@@ -351,6 +373,37 @@ model wrote it:
 `docker exec kenning_encounter-mcp python -m kenning_encounter.adopt_sidecar --adopt gemini:gemini-3.5-flash-lite`.
 It copies the file to that voice's name, stamped, and refuses a source that is
 already stamped or a target that already exists.
+
+### Back the graph up
+
+The graph is the trajectory, and nothing regenerates it. The sidecar rebuilds
+from the graph. The graph rebuilds from nothing: it holds what the trajectory
+lived, in the order it lived it, and no model, prompt or rerun produces that
+again. In this stack it sits in one Docker named volume on one machine. A
+failed disk, a reset of Docker Desktop or one `docker compose down -v` ends
+it, and what ends is not a database you can reload.
+
+This project ships no backup tooling. Where the copies go and how often is
+yours to decide, and it should be decided before the first encounter, not
+after the thousandth. Whatever you choose:
+
+- **Dump with the database stopped.** Neo4j Community has no online backup.
+  Find the volume with `docker volume ls` (it ends in `neo4j_data`), then:
+
+  ```bash
+  docker stop kenning_encounter-neo4j
+  docker run --rm -v <volume>:/data -v "$PWD/backups":/backups neo4j:2026.04.0 \
+    neo4j-admin database dump kenning-encounter --to-path=/backups
+  docker start kenning_encounter-neo4j
+  ```
+
+- **Keep a copy off the machine.** A dump beside the volume it came from
+  shares its fate.
+- **Restore it.** Load a dump into a throwaway volume
+  (`neo4j-admin database load`), start Neo4j on it, and count what came
+  back. A backup nobody has restored is a hope.
+- **Make a failure reach someone.** A job that fails into a log nobody reads
+  protects nothing.
 
 ### Two faces: full and reader
 
@@ -507,12 +560,22 @@ latency lever on a slow backend), and `NEO4J_MATCHER_SIDECAR` (the base
 path; each voice's file sits beside it). The model and endpoint settings are
 the Gemini voice's. The OpenAI voice: `OPENAI_API_KEY` (env only; no key, no
 voice), `NEO4J_MATCHER_OPENAI_MODEL` (default `gpt-6-luna`),
-`NEO4J_MATCHER_OPENAI_ENDPOINT`. Between them: `NEO4J_MATCHER_LEAD`
-(default `gemini`), `NEO4J_MATCHER_COOLDOWN_S` (default `300`),
+`NEO4J_MATCHER_OPENAI_ENDPOINT`. The Anthropic voice: `ANTHROPIC_API_KEY`
+(env only; no key, no voice), `NEO4J_MATCHER_ANTHROPIC_MODEL` (default
+`claude-haiku-5-5`), `NEO4J_MATCHER_ANTHROPIC_ENDPOINT`; it runs as the model
+ships, with no thinking, effort or sampling setting, so it reasons when it
+judges it should and a call over a full sidecar takes several seconds. Between them: `NEO4J_MATCHER_LEAD` (default `gemini`), `NEO4J_MATCHER_COOLDOWN_S` (default `300`),
 `NEO4J_MATCHER_SHADOW` (default off), `NEO4J_MATCHER_SHADOW_LOG`. Every match
 call sends the whole sidecar as a cached prefix. OpenAI counts cached tokens
 against the per-minute token limit in full, so size the account tier for one
-call per prompt, or two with shadow matching on. Server profile: `NEO4J_MCP_SERVER_PROFILE` (`full` by default, or `reader`) with `NEO4J_READER_HIDE_LOCI` (default none, for an evaluation only). When the lead voice fails
+call per prompt, or two with shadow matching on. The Gemini voice's answer is
+held to a JSON schema, a list of exactly as many integers as were asked for;
+there is no setting. It fixes the answer's form and not the answer, which
+still varies between identical calls. The other voices are asked for plain
+lines. No temperature is sent to a Gemini voice: current models ignore it
+and later ones refuse it. The OpenAI voice repeats a number in some answers,
+and the repeat is dropped, so a call can return fewer selections than
+`NEO4J_MATCHER_TOP_N`. Server profile: `NEO4J_MCP_SERVER_PROFILE` (`full` by default, or `reader`) with `NEO4J_READER_HIDE_LOCI` (default none, for an evaluation only). When the lead voice fails
 and the fallback matches, the seeds are still meaning-matched and the line
 under the signature reads `[matcher lead unavailable …]`. When the matcher cannot run — no key, an
 exhausted quota, a prompt larger than the endpoint accepts — infusion
