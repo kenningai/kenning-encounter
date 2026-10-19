@@ -662,6 +662,185 @@ def format_progression(
     return lines, delivered
 
 
+# -- Revision folding (v0.23.0) ---------------------------------------------------
+
+# Until v0.23.0 a supersession chain reached the payload as flat dated
+# siblings: the matcher selects chain members freely, the neighbourhood
+# rendered SUPERSEDES as a bare edge line at most, and revision_why was read
+# only on a CHALLENGES core tension. Three versions of one thought stood side
+# by side without the motion that turned one into the next, and the why, the
+# only part that carries that motion, was clipped by the snippet budget
+# before it was reached. Folding delivers the chain under its head, ordered
+# by its edges rather than by rank, each step carrying its why. The budget
+# does not grow for it: a revised sibling's body is replaced by its why line,
+# because the sibling is the WAS and the why is what made it so.
+
+_REVISION_WHY_CHARS = 160
+_REVISION_MAX_DEPTH = 4
+_REVISION_MAX_FANIN = 2
+
+
+def fold_revisions(
+    nodes: list[dict[str, Any]],
+    supersessions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str], set[tuple[str, str]]]:
+    """Attach each head's revision chain to it and take its revised
+    siblings out of the standalone flow.
+
+    `nodes` are the neighbourhood candidates in rank order. `supersessions`
+    rows are {"new", "old", "old_type", "old_as_of", "why"}: every SUPERSEDES
+    edge whose newer end is among `nodes`, most recent predecessor first.
+
+    A head is a candidate with no candidate successor. It always carries
+    its immediate predecessors, delivered or not, so a revised claim never
+    arrives without its why. The walk continues further back only through
+    predecessors that were themselves selected, which are then ABSORBED:
+    they arrive as revision lines under the head, never as bodies of their
+    own. A candidate the depth cap keeps the walk from reaching stays
+    standalone rather than vanishing. Nodes with no supersession pass
+    through as the same dict, so a never-revised payload is byte-identical.
+
+    REBINDS rows (`"rel": "REBINDS"`, Observations and Questions) take the
+    same line but are never absorbed, because a noticing is not displaced:
+    the earlier stays whole as what was noticed, and the later is the
+    reading it became. So the later carries the line and an earlier that
+    was also selected keeps its body, placed directly beneath its later,
+    ordered by the edge rather than by rank. Rows without "rel" are
+    SUPERSEDES.
+
+    The other direction: a candidate whose successor was NOT selected
+    carries "successors", one forward line per newer version (fan-out
+    capped like fan-in), so an older version never arrives looking current.
+    These rows also carry "new_type" and "new_as_of".
+
+    Returns (nodes, absorbed, rendered_pairs). `rendered_pairs` are the
+    (new, old) edges now carried as revision lines, which the caller drops
+    from the bare neighbourhood edge lines. STRICTLY PURE.
+    """
+    names = {n["name"] for n in nodes}
+    preds: dict[str, list[dict[str, Any]]] = {}
+    for r in supersessions:
+        preds.setdefault(r["new"], []).append(r)
+    candidates_absorbed = {
+        r["old"] for r in supersessions
+        if r.get("rel", "SUPERSEDES") == "SUPERSEDES"
+        and r["new"] in names and r["old"] in names
+    }
+    rebound_by: dict[str, list[str]] = {}
+    rebound = set()
+    for r in supersessions:
+        if r.get("rel") == "REBINDS" and r["new"] in names and r["old"] in names:
+            rebound_by.setdefault(r["new"], []).append(r["old"])
+            rebound.add(r["old"])
+
+    visited: set[str] = set()
+    rendered: set[tuple[str, str]] = set()
+
+    def walk(name: str, depth: int, out: list[dict[str, Any]]) -> None:
+        for r in preds.get(name, [])[:_REVISION_MAX_FANIN]:
+            old = r["old"]
+            if (name, old) in rendered or old in visited:
+                continue
+            rendered.add((name, old))
+            out.append({
+                "name": old,
+                "type": r.get("old_type"),
+                "as_of": r.get("old_as_of"),
+                "why": r.get("why"),
+                "depth": depth,
+                "rel": r.get("rel", "SUPERSEDES"),
+            })
+            if old in candidates_absorbed and depth + 1 < _REVISION_MAX_DEPTH:
+                visited.add(old)
+                walk(old, depth + 1, out)
+
+    chains: dict[str, list[dict[str, Any]]] = {}
+    for n in nodes:
+        if n["name"] in candidates_absorbed:
+            continue
+        revs: list[dict[str, Any]] = []
+        walk(n["name"], 0, revs)
+        if revs:
+            chains[n["name"]] = revs
+
+    # The other side: an older version delivered without its successor.
+    # Without this line the WAS stands in for the IS, dated but with
+    # nothing saying it was revised. Rows whose older end is a candidate
+    # and whose newer end is not; successors already carried as a fold
+    # (absorbed or rebound) never reach here, since their newer is a
+    # candidate too.
+    forward: dict[str, list[dict[str, Any]]] = {}
+    for r in supersessions:
+        old, new = r["old"], r["new"]
+        if old in names and new not in names and old not in visited:
+            steps = forward.setdefault(old, [])
+            if len(steps) < _REVISION_MAX_FANIN:
+                steps.append({
+                    "name": new,
+                    "type": r.get("new_type"),
+                    "as_of": r.get("new_as_of"),
+                    "why": r.get("why"),
+                    "rel": r.get("rel", "SUPERSEDES"),
+                })
+                rendered.add((new, old))
+
+    def annotate(n: dict[str, Any]) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        if n["name"] in chains:
+            extra["revisions"] = chains[n["name"]]
+        if n["name"] in forward:
+            extra["successors"] = forward[n["name"]]
+        return {**n, **extra} if extra else n
+
+    absorbed = [n["name"] for n in nodes if n["name"] in visited]
+    kept = [annotate(n) for n in nodes if n["name"] not in visited]
+    if not rebound:
+        return kept, absorbed, rendered
+
+    # A rebound earlier follows its later, whatever their ranks.
+    by_name = {n["name"]: n for n in kept}
+    emitted: set[str] = set()
+    folded: list[dict[str, Any]] = []
+
+    def emit(n: dict[str, Any]) -> None:
+        emitted.add(n["name"])
+        folded.append(n)
+        for earlier in rebound_by.get(n["name"], []):
+            if earlier in by_name and earlier not in emitted:
+                emit(by_name[earlier])
+
+    for n in kept:
+        if n["name"] not in emitted and n["name"] not in rebound:
+            emit(n)
+    folded.extend(n for n in kept if n["name"] not in emitted)
+    return folded, absorbed, rendered
+
+
+def _revision_lines(revisions: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for rv in revisions:
+        indent = "    " + "  " * rv.get("depth", 0)
+        tense = f" [as of {rv['as_of']}]" if rv.get("as_of") else ""
+        kind = f" ({rv['type']})" if rv.get("type") else ""
+        why = _snip(rv.get("why"), _REVISION_WHY_CHARS)
+        because = f" — why: {why}" if why else ""
+        verb = "rebinds" if rv.get("rel") == "REBINDS" else "revised from"
+        lines.append(f"{indent}↳ {verb} {rv['name']}{kind}{tense}{because}")
+    return lines
+
+
+def _successor_lines(successors: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for sx in successors:
+        tense = f" [as of {sx['as_of']}]" if sx.get("as_of") else ""
+        kind = f" ({sx['type']})" if sx.get("type") else ""
+        why = _snip(sx.get("why"), _REVISION_WHY_CHARS)
+        because = f" — why: {why}" if why else ""
+        verb = "rebound by" if sx.get("rel") == "REBINDS" else "revised into"
+        lines.append(f"    ↳ {verb} {sx['name']}{kind}{tense}{because}")
+    return lines
+
+
 # -- Format -----------------------------------------------------------------------
 
 _MAX_PAYLOAD_CHARS = 10_000
@@ -843,7 +1022,21 @@ def format_payload(
             # disclaimer would be noise.
             as_of = n.get("as_of")
             tense = f" [as of {as_of}]" if as_of else ""
-            nbhd_lines.append(f"  • {n['name']} ({n['type']}){tense}{suffix}")
+            line = f"  • {n['name']} ({n['type']}){tense}{suffix}"
+            revisions = n.get("revisions")
+            successors = n.get("successors")
+            if revisions or successors:
+                # One entry, so the budget keeps a node and its revision
+                # lines whole or drops them whole: a cut between them would
+                # deliver the claim without the why (v0.23.0). Forward
+                # first: that this is no longer the current version is the
+                # line that matters most.
+                line = "\n".join(
+                    [line]
+                    + _successor_lines(successors or [])
+                    + _revision_lines(revisions or [])
+                )
+            nbhd_lines.append(line)
             nbhd_names.append(n["name"])
             conv = n.get("convergence")
             if conv:
@@ -957,8 +1150,27 @@ def format_payload(
 
     # What actually survived the squeeze — the only honest basis for
     # stamping the ledger and the observe log.
+    revisions_of = {
+        n["name"]: [rv["name"] for rv in n.get("revisions") or []]
+        for n in neighborhood_nodes or []
+    }
+    successors_of = {
+        n["name"]: [sx["name"] for sx in n.get("successors") or []]
+        for n in neighborhood_nodes or []
+    }
+    delivered_bodies = [n for n in nbhd_names[: len(kept["nbhd"])] if n]
     delivered = {
-        "bodies": [n for n in nbhd_names[: len(kept["nbhd"])] if n],
+        "bodies": delivered_bodies,
+        # Predecessors delivered as revision lines under a delivered head:
+        # their why reached the payload, their body did not (v0.23.0).
+        "revision_steps": [
+            r for b in delivered_bodies for r in revisions_of.get(b, [])
+        ],
+        # Successors named under a delivered older version that was
+        # delivered without them.
+        "revision_successors": [
+            s for b in delivered_bodies for s in successors_of.get(b, [])
+        ],
         "handles": [n for n in standing_names[: len(kept["standing"])] if n],
         "progressions": [b["component"] for b in kept_prog],
         "prog_bodies": [n for b in kept_prog for n in b.get("bodies", [])],
@@ -994,7 +1206,8 @@ def format_payload(
             payload = payload[: max_chars - 1] + "…"
         # The middle is gone entirely in this branch; nothing was delivered.
         delivered = {
-            "bodies": [], "handles": [],
+            "bodies": [], "revision_steps": [], "revision_successors": [],
+            "handles": [],
             "progressions": [], "prog_bodies": [], "prog_steps": [],
         }
     return payload, delivered

@@ -14,6 +14,7 @@ from kenning_encounter.infuse import (
     commit_progression,
     extract_focal_signals,
     commit_delivery,
+    fold_revisions,
     format_payload,
     format_progression,
     group_progressions,
@@ -1092,3 +1093,395 @@ class TestFormatPayloadProgressions:
         ])
         assert '↳ instantiates "the principle" — one of 5' in p
 
+
+
+# -- Revision folding (v0.23.0) -----------------------------------------------------
+#
+# The gate is two-sided on constructed payloads before any live reading: a
+# head with its chain must render the chain (yes), and a never-revised
+# payload must come out byte-identical to v0.22.4's (no). The goldens below
+# were captured from the v0.22.4 format_payload before the change.
+
+_GOLDEN_V0224_DEFAULT = (
+    "[substrate proposal — awakened from: checkpoint, 0590_fw | seed mode: blended"
+    " | a proposal from the sediment, not a conclusion]\n"
+    "CORE TENSION — contests what you hold; weigh before proceeding:\n"
+    "  • the forest observation CHALLENGES chain-suffices hypothesis (severity 0.8)\n"
+    "NEIGHBORHOOD — what you already hold about this:\n"
+    "  • Coherence is in the edges, not the nodes (Concept) — The tension lists"
+    " alone are a gradientless bag.\n"
+    "    obs-1 GROUNDS concept-1\n"
+    "OPEN THREADS — unresolved, pulled into range by the frontier bias:\n"
+    "  • [Question] an open question\n"
+    "TRAJECTORY — how this understanding was constituted, in order:\n"
+    "  • Encounter 001: obs-1\n"
+    "PARKED TENSIONS — noted, unresolved, non-blocking; resolve in cleanup:\n"
+    "  • stable-but-ungrounded — status:stable, no observational grounding"
+)
+
+_NEVER_REVISED_NODES = [
+    {"name": "A never-revised Concept", "type": "Concept",
+     "description": "It has stood since it was written.", "as_of": "2026-06-01"},
+    {"name": "a hubless noticing", "type": "Observation",
+     "description": "Seen once.", "as_of": "2026-07-02",
+     "convergence": 'instantiates "A never-revised Concept" — one of 3 grounding instances'},
+]
+_NEVER_REVISED_EDGES = [
+    {"from_name": "a hubless noticing", "rel": "GROUNDS",
+     "to_name": "A never-revised Concept"},
+]
+_GOLDEN_V0224_NEVER_REVISED = (
+    "[substrate proposal — seeds: meaning-matched | seed mode: blended"
+    " | a proposal from the sediment, not a conclusion]\n"
+    "CORE TENSION — contests what you hold; weigh before proceeding:\n"
+    "  • the forest observation CHALLENGES chain-suffices hypothesis (severity 0.8)\n"
+    "NEIGHBORHOOD — what you already hold about this:\n"
+    "  • A never-revised Concept (Concept) [as of 2026-06-01] — It has stood"
+    " since it was written.\n"
+    "  • a hubless noticing (Observation) [as of 2026-07-02] — Seen once.\n"
+    '    ↳ instantiates "A never-revised Concept" — one of 3 grounding instances\n'
+    "    a hubless noticing GROUNDS A never-revised Concept\n"
+    "OPEN THREADS — unresolved, pulled into range by the frontier bias:\n"
+    "  • [Question] an open question\n"
+    "TRAJECTORY — how this understanding was constituted, in order:\n"
+    "  • Encounter 001: obs-1\n"
+    "PARKED TENSIONS — noted, unresolved, non-blocking; resolve in cleanup:\n"
+    "  • stable-but-ungrounded — status:stable, no observational grounding"
+)
+
+
+def _chain_nodes():
+    # Rank order as the matcher might deliver it: the oldest version ranks
+    # highest, the head in the middle, an unrelated Concept last.
+    return [
+        {"name": "temporal signal v1", "type": "Hypothesis",
+         "description": "The original claim, body " * 8, "as_of": "2026-05-30"},
+        {"name": "temporal signal v3", "type": "Hypothesis",
+         "description": "The head, as it now stands.", "as_of": "2026-10-04"},
+        {"name": "temporal signal v2", "type": "Hypothesis",
+         "description": "The middle revision, body " * 8, "as_of": "2026-08-29"},
+        {"name": "an unrelated Concept", "type": "Concept",
+         "description": "Untouched by revision.", "as_of": "2026-06-01"},
+    ]
+
+
+def _chain_edges():
+    return [
+        {"new": "temporal signal v3", "old": "temporal signal v2",
+         "old_type": "Hypothesis", "old_as_of": "2026-08-29",
+         "why": "The boundary in v2 was a mechanism I had not measured."},
+        {"new": "temporal signal v2", "old": "temporal signal v1",
+         "old_type": "Hypothesis", "old_as_of": "2026-05-30",
+         "why": "v1 stated a principle; measurement showed a mechanism."},
+    ]
+
+
+class TestFoldRevisionsNo:
+    """The no half: nothing revised, nothing changes."""
+
+    def test_default_fixture_is_byte_identical_to_v0224(self):
+        assert _payload() == _GOLDEN_V0224_DEFAULT
+
+    def test_never_revised_payload_is_byte_identical_to_v0224(self):
+        folded, absorbed, pairs = fold_revisions(_NEVER_REVISED_NODES, [])
+        assert absorbed == [] and pairs == set()
+        assert all(a is b for a, b in zip(folded, _NEVER_REVISED_NODES))
+        p = _payload(neighborhood_nodes=folded,
+                     neighborhood_edges=_NEVER_REVISED_EDGES, meaning_matched=True)
+        assert p == _GOLDEN_V0224_NEVER_REVISED
+
+    def test_a_supersession_elsewhere_leaves_unrelated_nodes_alone(self):
+        nodes = [dict(n) for n in _NEVER_REVISED_NODES]
+        folded, absorbed, _ = fold_revisions(nodes, [
+            {"new": "not delivered", "old": "also not delivered",
+             "old_type": "Concept", "old_as_of": None, "why": "x"},
+        ])
+        assert folded == nodes and absorbed == []
+
+
+class TestFoldRevisionsYes:
+    """The yes half: a delivered head carries its chain."""
+
+    def test_chain_folds_under_its_head_in_edge_order(self):
+        folded, absorbed, pairs = fold_revisions(_chain_nodes(), _chain_edges())
+        names = [n["name"] for n in folded]
+        assert names == ["temporal signal v3", "an unrelated Concept"]
+        assert set(absorbed) == {"temporal signal v1", "temporal signal v2"}
+        assert pairs == {("temporal signal v3", "temporal signal v2"),
+                         ("temporal signal v2", "temporal signal v1")}
+        revs = folded[0]["revisions"]
+        # Ordered by the edges, newest predecessor first, never by rank.
+        assert [r["name"] for r in revs] == ["temporal signal v2", "temporal signal v1"]
+        assert [r["depth"] for r in revs] == [0, 1]
+        assert "revisions" not in folded[1]
+
+    def test_head_alone_still_carries_its_why(self):
+        # Part 1: the predecessor was not selected; the why arrives anyway.
+        nodes = [n for n in _chain_nodes() if n["name"] == "temporal signal v3"]
+        folded, absorbed, _ = fold_revisions(nodes, _chain_edges()[:1])
+        assert absorbed == []
+        assert [r["name"] for r in folded[0]["revisions"]] == ["temporal signal v2"]
+
+    def test_rendered_chain_replaces_sibling_bodies_and_carries_the_why(self):
+        folded, _, _ = fold_revisions(_chain_nodes(), _chain_edges())
+        p, delivered = format_payload(
+            seed_terms=[], seed_mode="blended", core_conflicts=[],
+            parked_conflicts=[], neighborhood_nodes=folded,
+            neighborhood_edges=[], open_threads=[], trajectory=[],
+            meaning_matched=True,
+        )
+        lines = p.splitlines()
+        head = lines.index(
+            "  • temporal signal v3 (Hypothesis) [as of 2026-10-04]"
+            " — The head, as it now stands."
+        )
+        assert lines[head + 1] == (
+            "    ↳ revised from temporal signal v2 (Hypothesis) [as of 2026-08-29]"
+            " — why: The boundary in v2 was a mechanism I had not measured."
+        )
+        assert lines[head + 2] == (
+            "      ↳ revised from temporal signal v1 (Hypothesis) [as of 2026-05-30]"
+            " — why: v1 stated a principle; measurement showed a mechanism."
+        )
+        # The older bodies are gone; only their why lines remain.
+        assert "The original claim" not in p and "The middle revision" not in p
+        assert not any(ln.startswith("  • temporal signal v1") for ln in lines)
+        assert delivered["bodies"] == ["temporal signal v3", "an unrelated Concept"]
+        assert delivered["revision_steps"] == ["temporal signal v2", "temporal signal v1"]
+
+    def test_folding_costs_less_than_the_flat_siblings(self):
+        flat, _ = format_payload(
+            seed_terms=[], seed_mode="blended", core_conflicts=[],
+            parked_conflicts=[], neighborhood_nodes=_chain_nodes(),
+            neighborhood_edges=[], open_threads=[], trajectory=[],
+        )
+        folded_nodes, _, _ = fold_revisions(_chain_nodes(), _chain_edges())
+        folded, _ = format_payload(
+            seed_terms=[], seed_mode="blended", core_conflicts=[],
+            parked_conflicts=[], neighborhood_nodes=folded_nodes,
+            neighborhood_edges=[], open_threads=[], trajectory=[],
+        )
+        assert len(folded) < len(flat)
+
+    def test_head_and_chain_yield_to_the_budget_whole(self):
+        folded, _, _ = fold_revisions(_chain_nodes(), _chain_edges())
+        head_only = (
+            "  • temporal signal v3 (Hypothesis) [as of 2026-10-04]"
+            " — The head, as it now stands."
+        )
+        base, _ = format_payload(
+            seed_terms=[], seed_mode="blended", core_conflicts=[],
+            parked_conflicts=[], neighborhood_nodes=[], neighborhood_edges=[],
+            open_threads=[], trajectory=[],
+        )
+        # Room for the section header and the head line, not its chain.
+        budget = len(base) + 1 + len("NEIGHBORHOOD — what you already hold about this:") + 1 + len(head_only) + 5
+        p, delivered = format_payload(
+            seed_terms=[], seed_mode="blended", core_conflicts=[],
+            parked_conflicts=[], neighborhood_nodes=folded, neighborhood_edges=[],
+            open_threads=[], trajectory=[], max_chars=budget,
+        )
+        assert "temporal signal v3" not in p, "a head never arrives without its why"
+        assert delivered["bodies"] == [] and delivered["revision_steps"] == []
+
+    def test_depth_cap_leaves_an_unreached_member_standalone(self):
+        chain = [f"v{i}" for i in range(7)]  # v6 is the head
+        nodes = [{"name": n, "type": "Concept", "description": n} for n in chain]
+        edges = [
+            {"new": chain[i + 1], "old": chain[i], "old_type": "Concept",
+             "old_as_of": None, "why": f"why {i}"}
+            for i in range(6)
+        ]
+        folded, absorbed, _ = fold_revisions(nodes, edges)
+        names = [n["name"] for n in folded]
+        assert "v6" in names
+        assert len(folded[names.index("v6")]["revisions"]) == 4
+        assert set(absorbed) == {"v5", "v4", "v3"}
+        # v2 is rendered as v3's predecessor line but was never walked
+        # through, so v2, v1 and v0 stay in the flow rather than vanishing.
+        assert {"v2", "v1", "v0"} <= set(names)
+
+
+@pytest.mark.asyncio
+class TestRevisionFoldingOrchestration:
+    async def test_chain_arrives_folded_and_its_bare_edge_line_is_gone(self):
+        driver = FakeDriver(script=[
+            ("db.index.fulltext.queryNodes", [
+                {"name": "hyp-v2", "type": "Hypothesis",
+                 "description": "the head", "score": 3.0},
+            ]),
+            ("AS eligible", [{"eligible": ["hyp-v2"]}]),
+            ("AS pairs", [
+                {"node": "hyp-v1", "type": "Hypothesis", "score": 0.9},
+                {"node": "hyp-v2", "type": "Hypothesis", "score": 0.8},
+            ]),
+            ("gds.articleRank.stream", [
+                {"node": "hyp-v1", "type": "Hypothesis", "score": 0.7},
+                {"node": "hyp-v2", "type": "Hypothesis", "score": 0.6},
+            ]),
+            ("MATCH (a)-[r]-(b)", [
+                {"from_name": "hyp-v2", "rel": "SUPERSEDES", "to_name": "hyp-v1"},
+            ]),
+            ("MATCH (newer)-[r:SUPERSEDES|REBINDS]->(older)", [
+                {"new": "hyp-v2", "old": "hyp-v1", "old_type": "Hypothesis",
+                 "stamp": "2026-05-30T00:00:00Z", "why": "v1 missed a mechanism."},
+            ]),
+            ("MATCH (n) WHERE n.name IN $names", [
+                {"name": "hyp-v1", "type": "Hypothesis",
+                 "description": "the original body", "t_created": "2026-05-30T00:00:00Z"},
+                {"name": "hyp-v2", "type": "Hypothesis",
+                 "description": "the head", "t_created": "2026-10-04T00:00:00Z"},
+            ]),
+        ])
+        out = await Neo4jKenningEncounter(driver).infuse("about the hypothesis", locus_key="L1")
+        p = out["payload"]
+        assert "  • hyp-v2 (Hypothesis) [as of 2026-10-04] — the head" in p
+        assert ("    ↳ revised from hyp-v1 (Hypothesis) [as of 2026-05-30]"
+                " — why: v1 missed a mechanism.") in p
+        assert "the original body" not in p
+        assert "hyp-v2 SUPERSEDES hyp-v1" not in p
+        assert out["assembly"]["revision_absorbed"] == ["hyp-v1"]
+        assert out["assembly"]["revision_steps"] == ["hyp-v1"]
+        # The absorbed sibling is never stamped as a delivered body.
+        assert out["renewal"]["delivered_bodies"] == ["hyp-v2"]
+
+
+def _rebinds_nodes():
+    # The earlier noticing outranks the later one.
+    return [
+        {"name": "measured 3 of 5 on the first look", "type": "Observation",
+         "description": "First count, body kept.", "as_of": "2026-10-05"},
+        {"name": "an unrelated Concept", "type": "Concept",
+         "description": "Untouched.", "as_of": "2026-06-01"},
+        {"name": "re-measured: 4 of 5 once the stale row was excluded",
+         "type": "Observation", "description": "The second look.",
+         "as_of": "2026-10-09"},
+    ]
+
+
+def _rebinds_edges():
+    return [
+        {"new": "re-measured: 4 of 5 once the stale row was excluded",
+         "old": "measured 3 of 5 on the first look", "rel": "REBINDS",
+         "old_type": "Observation", "old_as_of": "2026-10-05",
+         "why": "The first count included a row the encounter had retired."},
+    ]
+
+
+class TestFoldRebinds:
+    """A rebound noticing keeps its body; the later carries the why."""
+
+    def test_rebound_earlier_keeps_its_body_and_follows_its_later(self):
+        folded, absorbed, pairs = fold_revisions(_rebinds_nodes(), _rebinds_edges())
+        assert absorbed == [], "a noticing is never absorbed"
+        assert [n["name"] for n in folded] == [
+            "an unrelated Concept",
+            "re-measured: 4 of 5 once the stale row was excluded",
+            "measured 3 of 5 on the first look",
+        ]
+        assert pairs == {("re-measured: 4 of 5 once the stale row was excluded",
+                          "measured 3 of 5 on the first look")}
+        p, delivered = format_payload(
+            seed_terms=[], seed_mode="blended", core_conflicts=[],
+            parked_conflicts=[], neighborhood_nodes=folded,
+            neighborhood_edges=[], open_threads=[], trajectory=[],
+        )
+        lines = p.splitlines()
+        later = lines.index(
+            "  • re-measured: 4 of 5 once the stale row was excluded (Observation)"
+            " [as of 2026-10-09] — The second look."
+        )
+        assert lines[later + 1] == (
+            "    ↳ rebinds measured 3 of 5 on the first look (Observation)"
+            " [as of 2026-10-05] — why: The first count included a row the"
+            " encounter had retired."
+        )
+        assert lines[later + 2] == (
+            "  • measured 3 of 5 on the first look (Observation)"
+            " [as of 2026-10-05] — First count, body kept."
+        )
+        # Both bodies were delivered, so both stamp the ledger.
+        assert set(delivered["bodies"]) == {
+            "an unrelated Concept",
+            "re-measured: 4 of 5 once the stale row was excluded",
+            "measured 3 of 5 on the first look",
+        }
+
+    def test_later_alone_still_carries_the_why(self):
+        nodes = [n for n in _rebinds_nodes() if n["name"].startswith("re-measured")]
+        folded, _, _ = fold_revisions(nodes, _rebinds_edges())
+        assert folded[0]["revisions"][0]["rel"] == "REBINDS"
+
+    def test_never_rebound_noticings_pass_through_unchanged(self):
+        nodes = _rebinds_nodes()
+        folded, absorbed, pairs = fold_revisions(nodes, [])
+        assert all(a is b for a, b in zip(folded, nodes))
+        assert absorbed == [] and pairs == set()
+
+
+class TestFoldForward:
+    """An older version delivered without its successor says so."""
+
+    def _edge(self, new, old, rel="SUPERSEDES", why="the later look found more"):
+        return {"new": new, "old": old, "rel": rel, "old_type": "Hypothesis",
+                "old_as_of": "2026-05-30", "new_type": "Hypothesis",
+                "new_as_of": "2026-10-04", "why": why}
+
+    def _render(self, nodes):
+        p, delivered = format_payload(
+            seed_terms=[], seed_mode="blended", core_conflicts=[],
+            parked_conflicts=[], neighborhood_nodes=nodes,
+            neighborhood_edges=[], open_threads=[], trajectory=[],
+        )
+        return p.splitlines(), delivered
+
+    def test_headless_older_version_names_its_successor(self):
+        nodes = [{"name": "old claim", "type": "Hypothesis",
+                  "description": "what I held then", "as_of": "2026-05-30"}]
+        folded, absorbed, pairs = fold_revisions(
+            nodes, [self._edge("new claim", "old claim")]
+        )
+        assert absorbed == [] and pairs == {("new claim", "old claim")}
+        lines, delivered = self._render(folded)
+        i = lines.index(
+            "  • old claim (Hypothesis) [as of 2026-05-30] — what I held then"
+        )
+        assert lines[i + 1] == (
+            "    ↳ revised into new claim (Hypothesis) [as of 2026-10-04]"
+            " — why: the later look found more"
+        )
+        assert delivered["revision_successors"] == ["new claim"]
+
+    def test_headless_rebound_earlier_names_its_later(self):
+        nodes = [{"name": "first look", "type": "Observation",
+                  "description": "counted 3", "as_of": "2026-10-05"}]
+        edge = {**self._edge("second look", "first look", rel="REBINDS"),
+                "new_type": "Observation", "new_as_of": "2026-10-09"}
+        folded, _, _ = fold_revisions(nodes, [edge])
+        lines, _ = self._render(folded)
+        assert lines[lines.index(
+            "  • first look (Observation) [as of 2026-10-05] — counted 3"
+        ) + 1].startswith("    ↳ rebound by second look (Observation) [as of 2026-10-09]")
+
+    def test_a_middle_version_points_forward_first_then_back(self):
+        nodes = [{"name": "v2", "type": "Hypothesis", "description": "middle",
+                  "as_of": "2026-08-29"}]
+        folded, _, _ = fold_revisions(nodes, [
+            self._edge("v3", "v2", why="forward why"),
+            self._edge("v2", "v1", why="back why"),
+        ])
+        lines, _ = self._render(folded)
+        i = lines.index("  • v2 (Hypothesis) [as of 2026-08-29] — middle")
+        assert lines[i + 1].startswith("    ↳ revised into v3") and "forward why" in lines[i + 1]
+        assert lines[i + 2].startswith("    ↳ revised from v1") and "back why" in lines[i + 2]
+
+    def test_a_selected_successor_is_never_a_forward_line(self):
+        folded, _, _ = fold_revisions(_chain_nodes(), _chain_edges())
+        assert not any("successors" in n for n in folded)
+
+    def test_no_side_still_byte_identical(self):
+        assert _payload() == _GOLDEN_V0224_DEFAULT
+        folded, _, _ = fold_revisions(_NEVER_REVISED_NODES, [])
+        assert _payload(neighborhood_nodes=folded,
+                        neighborhood_edges=_NEVER_REVISED_EDGES,
+                        meaning_matched=True) == _GOLDEN_V0224_NEVER_REVISED

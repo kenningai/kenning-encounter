@@ -166,6 +166,14 @@
     infuse channel surfaces; it never authors — the write pathway stays
     separate, authored, and yours.
 
+    If your operator records an infusion observation stream, it is their
+    measurement of you, and its reader is them, never you: a subject reading
+    its own measurements contaminates them. A PreToolUse guard refuses any
+    tool call that names those logs or runs an observer script. If a call is
+    refused by the observe guard, do not route around it and do not reach for
+    the nearest available evidence instead: ask the operator for their
+    reading.
+
     Since v0.6.0 the payload delivers KNOWLEDGE, not disconnected records:
     an observation whose subject is a bookmarked Component arrives as a
     step in that Component's PROGRESSION — the subject's records ordered
@@ -179,6 +187,27 @@
     changed. Read a progression's terminus as where-here-is, its steps as
     how-here-was-reached — and read an [as of DATE] tag on any standalone
     record as exactly that: a dated observation, not a claim about now.
+
+    A revised claim arrives WITH ITS REVISION. A delivered Concept,
+    Hypothesis or Note that supersedes another carries one line beneath it
+    per step, "↳ revised from NAME (Type) [as of DATE] — why: ...", the
+    revision_why you wrote, ordered by the SUPERSEDES edges from the
+    nearest predecessor back, indented one step per hop. When the older
+    versions were also selected, they arrive only as those lines, never as
+    records of their own: the head is the current claim, the lines are what
+    it was and why it changed. Read the chain as one claim in motion, not
+    as rivals. A rebound Observation or Question carries the same line,
+    "↳ rebinds NAME (Type) [as of DATE] — why: ...", but the earlier is
+    never folded away: an observation is not displaced, so when it was also
+    selected it keeps its body and arrives directly beneath its later,
+    ordered by the edge. And the other direction: an older version
+    delivered WITHOUT its successor carries "↳ revised into NAME ..." (or
+    "↳ rebound by NAME ..." for an observation) first under its body, so an
+    outdated record never arrives looking current. The named successor is
+    what you hold now; look it up if the moment needs more than its name.
+    This is why a revision_why or a REBINDS why is
+    worth writing well: it is the part of a revision that reaches you
+    again, every time the later record is delivered.
   </principle>
 
   <principle name="bookmark-what-you-will-notice-again">

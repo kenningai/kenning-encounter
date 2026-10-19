@@ -13,6 +13,7 @@ from .infuse import (
     commit_progression,
     content_key,
     extract_focal_signals,
+    fold_revisions,
     format_payload,
     format_progression,
     group_progressions,
@@ -2521,6 +2522,48 @@ class Neo4jKenningEncounter:
                 n for n in nbhd_nodes if n["name"] not in member_names
             ]
 
+        # Revision folding (v0.23.0): a chain arrives under its head,
+        # ordered by its SUPERSEDES edges, each step carrying its why;
+        # revised siblings give up their bodies to those lines. A REBINDS
+        # step carries the same line but its earlier keeps its body, placed
+        # beneath its later. Before the renewal partition, so an absorbed
+        # sibling is never fingerprinted or stamped as a delivered body.
+        absorbed: list[str] = []
+        if nbhd_nodes:
+            sup_res = await self.driver.execute_query(
+                "MATCH (newer)-[r:SUPERSEDES|REBINDS]->(older) "
+                "WHERE newer.name IN $names OR older.name IN $names "
+                "WITH newer, older, r, "
+                "     toString(coalesce(older.t_observed, older.t_created)) AS stamp, "
+                "     toString(coalesce(newer.t_observed, newer.t_created)) AS new_stamp "
+                "RETURN newer.name AS new, older.name AS old, type(r) AS rel, "
+                "       labels(older)[0] AS old_type, stamp, "
+                "       labels(newer)[0] AS new_type, new_stamp, "
+                "       coalesce(r.revision_why, r.why) AS why "
+                "ORDER BY stamp DESC, new_stamp DESC",
+                {"names": [n["name"] for n in nbhd_nodes]},
+                routing_=RoutingControl.READ,
+            )
+            supersessions = [
+                {
+                    **row,
+                    "old_as_of": (row.get("stamp") or "")[:10] or None,
+                    "new_as_of": (row.get("new_stamp") or "")[:10] or None,
+                }
+                for row in (dict(r) for r in sup_res.records)
+            ]
+            nbhd_nodes, absorbed, folded_pairs = fold_revisions(
+                nbhd_nodes, supersessions
+            )
+            if folded_pairs:
+                nbhd_edges = [
+                    e for e in nbhd_edges
+                    if not (
+                        e["rel"] in ("SUPERSEDES", "REBINDS")
+                        and (e["from_name"], e["to_name"]) in folded_pairs
+                    )
+                ]
+
         # Blind-spot log (§1.5): selected Observations with no Component
         # hub cannot be assembled — the working list for the bookmark
         # discipline, surfaced by the instrument rather than hoped for.
@@ -2688,6 +2731,11 @@ class Neo4jKenningEncounter:
                 "prog_bodies": delivered.get("prog_bodies", []),
                 "prog_steps": delivered.get("prog_steps", []),
                 "unassembled": unassembled,
+                # v0.23.0: selected siblings folded under their heads, and
+                # the predecessors whose why actually reached the payload.
+                "revision_absorbed": absorbed,
+                "revision_steps": delivered.get("revision_steps", []),
+                "revision_successors": delivered.get("revision_successors", []),
             },
             "renewal": {
                 # SELECTED — what the partition chose this turn.

@@ -17,6 +17,7 @@ every waking and reports when the copy is behind the repo's sealed main.
 Wiring (~/.claude/settings.json) then points at the installed copies:
     SessionStart:     python3 ~/.kenning_encounter/hooks/kenning_encounter_session_start_hook.py
     UserPromptSubmit: python3 ~/.kenning_encounter/hooks/kenning_encounter_infuse_hook.py
+    PreToolUse:       python3 ~/.kenning_encounter/hooks/kenning_encounter_observe_guard.py   (no matcher)
 
 Stdlib only.
 """
@@ -33,7 +34,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-HOOKS = ("kenning_encounter_infuse_hook.py", "kenning_encounter_session_start_hook.py")
+HOOKS = ("kenning_encounter_infuse_hook.py", "kenning_encounter_session_start_hook.py", "kenning_encounter_observe_guard.py")
 MANIFEST = "SOURCE.json"
 LEGACY_NOTE = "SOURCE.txt"
 SEMVER = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")

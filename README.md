@@ -213,7 +213,7 @@ Neither grades meaning: two different selections can each bear on a moment,
 and whether an infusion helped is judged by the person working with the
 agent, not by a script.
 
-Three disciplines keep the channel honest:
+Four disciplines keep the channel honest:
 
 - **The renewal economy.** A per-session delivery ledger: a node's full body
   is delivered at first sight, on a changed fact-state, or after a staleness
@@ -222,6 +222,17 @@ Three disciplines keep the channel honest:
   context"). Payloads rotate with the work instead of droning a permanent
   core. The ledger is stamped from what was actually *delivered*, never
   merely selected, and the metadata reports both.
+- **Revisions arrive with their why.** A delivered claim that supersedes
+  another carries its chain beneath it, one `↳ revised from … — why: …`
+  line per step, ordered by the `SUPERSEDES` edges rather than by rank.
+  Older versions that were also selected fold into those lines instead of
+  arriving as flat dated records that read like rival claims, so the
+  budget does not grow. A rebound observation or question carries a
+  `↳ rebinds … — why: …` line the same way, but its earlier keeps its
+  body and arrives directly beneath it. An older version delivered
+  without its successor carries `↳ revised into …` instead, so it never
+  arrives looking current. The metadata reports which were
+  folded and whose why was delivered.
 - **Silence is a valid answer.** When the arriving prompt touches nothing
   the graph holds and contests nothing it believes, the payload is the empty
   string and the hook stays quiet.
@@ -256,7 +267,7 @@ healthy answer, not a fault.
 
 Run the hooks from an installed copy, not from your clone's working tree. A
 working tree can hold changes you have not released, and a hook runs at the
-start of every session. The installer copies both hooks out of git at a
+start of every session. The installer copies the three hooks out of git at a
 tagged release (it refuses an untagged ref) and records what it installed in
 `SOURCE.json`:
 
@@ -271,10 +282,23 @@ python3 scripts/kenning_encounter_install_hooks.py --check    # exit 1 if the co
     "SessionStart": [{ "hooks": [{ "type": "command",
       "command": "/absolute/path/to/python3 ~/.kenning_encounter/hooks/kenning_encounter_session_start_hook.py" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command",
-      "command": "/absolute/path/to/python3 ~/.kenning_encounter/hooks/kenning_encounter_infuse_hook.py" }] }]
+      "command": "/absolute/path/to/python3 ~/.kenning_encounter/hooks/kenning_encounter_infuse_hook.py" }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command",
+      "command": "KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG=/path/to/observe.jsonl /absolute/path/to/python3 ~/.kenning_encounter/hooks/kenning_encounter_observe_guard.py" }] }]
   }
 }
 ```
+
+The third hook is the observe guard. If you record an observation stream,
+its reader is you, never the agent: a subject reading its own measurements
+contaminates them. The guard denies any agent tool call whose path or shell
+command names the log's directory (give it the same
+`KENNING_ENCOUNTER_INFUSE_OBSERVE_LOG` / `_SHADOW_LOG` values as the infuse
+hook; `KENNING_ENCOUNTER_GUARD_PATHS` adds more), and any shell command that
+runs an observer script (`KENNING_ENCOUNTER_GUARD_SCRIPTS` adds more). The
+denial tells the agent to ask you instead. It runs only on the agent's tool
+calls, so your own terminal is untouched. It guards against accident, not
+evasion, and if it cannot read a call it allows it and says so.
 
 The session-start hook hands the trajectory its harness session id. Installed
 this way, it also compares the copy with the same files at your clone's
